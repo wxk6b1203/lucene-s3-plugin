@@ -28,6 +28,8 @@ dependencies {
     implementation deps.roaringbitmap
     implementation platform(deps.awssdk.bom)
     implementation deps.awssdk.s3
+    implementation deps.jackson.core
+    implementation deps.jackson.databind
 }
 
 test {
