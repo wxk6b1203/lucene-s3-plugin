@@ -1,0 +1,9 @@
+rootProject.name = 'lucene-s3'
+
+dependencyResolutionManagement {
+    versionCatalogs {
+        deps {
+            from(files('versions.toml'))
+        }
+    }
+}

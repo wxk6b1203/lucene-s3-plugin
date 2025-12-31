@@ -1,0 +1,19 @@
+[versions]
+lucene = "10.3.2"
+roaringbitmap = "1.6.0"
+awssdk = "2.41.0"
+ratis = "3.2.1"
+jetcd = "0.8.6"
+lombok = "1.18.42"
+
+[libraries]
+lucene-core = { module = "org.apache.lucene:lucene-core", version.ref = "lucene" }
+lucene-analyzers-common = { module = "org.apache.lucene:lucene-analysis-common", version.ref = "lucene" }
+lucene-query-parser = { module = "org.apache.lucene:lucene-queryparser", version.ref = "lucene" }
+roaringbitmap = { module = "com.github.RoaringBitmap.RoaringBitmap:roaringbitmap", version.ref = "roaringbitmap" }
+awssdk-bom = { module = "software.amazon.awssdk:bom", version.ref = "awssdk" }
+awssdk-s3 = { module = "software.amazon.awssdk:s3", version.ref = "awssdk" }
+ratis-server = { module = "org.apache.ratis:ratis-server", version.ref = "ratis" }
+ratis-netty = { module = "org.apache.ratis:ratis-netty", version.ref = "ratis" }
+jetcd-core = { module = "io.etcd:jetcd-core", version.ref = "jetcd" }
+lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
