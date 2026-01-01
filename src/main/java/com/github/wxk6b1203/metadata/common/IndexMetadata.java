@@ -12,8 +12,9 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 @Accessors(chain = true)
 public class IndexMetadata {
-    private String indexName;
+    private String name;
     private long epoch;
+    private IndexMappings mappings;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

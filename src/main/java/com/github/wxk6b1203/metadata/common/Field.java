@@ -13,5 +13,5 @@ import org.apache.lucene.document.FieldType;
 public class Field {
     private String name;
     private String type;
-    private boolean stored;
+    private IndexableFieldTypeSpec spec;
 }
