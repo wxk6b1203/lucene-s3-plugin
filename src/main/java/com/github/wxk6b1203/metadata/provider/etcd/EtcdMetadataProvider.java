@@ -5,7 +5,6 @@ import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.MetadataProvider;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
-import io.etcd.jetcd.op.Op;
 import lombok.Builder;
 import lombok.Data;
 
@@ -23,6 +22,7 @@ public class EtcdMetadataProvider extends MetadataProvider {
         private String endpoints;
         private String username;
         private String password;
+        @Builder.Default
         private String namespace = "metadata/";
     }
 

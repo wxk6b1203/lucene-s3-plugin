@@ -1,19 +1,23 @@
 package com.github.wxk6b1203.store;
 
+import com.github.wxk6b1203.metadata.provider.MetadataProvider;
 import org.apache.lucene.store.*;
+import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Set;
 
 public class S3LRUDirectory extends BaseDirectory {
-    /**
-     * Sole constructor.
-     *
-     * @param lockFactory
-     */
-    protected S3LRUDirectory(LockFactory lockFactory) {
-        super(lockFactory);
+    private final MetadataProvider metadataProvider;
+    private final S3Client s3Client;
+
+    public S3LRUDirectory(MetadataProvider metadataProvider,
+                             S3LockFactory s3LockFactory,
+                             S3Client s3Client) {
+        super(s3LockFactory);
+        this.metadataProvider = metadataProvider;
+        this.s3Client = s3Client;
     }
 
     @Override
