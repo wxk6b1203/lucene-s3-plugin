@@ -39,10 +39,14 @@ public class EtcdMetadataProvider extends MetadataProvider {
 
     public EtcdMetadataProvider(Options opt) {
         this.namespace = opt.namespace;
-        this.client = Client.builder().endpoints(opt.endpoints)
-                .user(ByteSequence.from(opt.username.getBytes(StandardCharsets.UTF_8)))
-                .password(ByteSequence.from(opt.password.getBytes(StandardCharsets.UTF_8)))
-                .build();
+        var cb = Client.builder().endpoints(opt.endpoints);
+        if (opt.username != null && !opt.username.isEmpty()) {
+            cb.user(ByteSequence.from(opt.username, StandardCharsets.UTF_8));
+        }
+        if (opt.password != null && !opt.password.isEmpty()) {
+            cb.password(ByteSequence.from(opt.password, StandardCharsets.UTF_8));
+        }
+        this.client = cb.build();
     }
 
     @Override
@@ -71,7 +75,7 @@ public class EtcdMetadataProvider extends MetadataProvider {
     public long store(IndexMetadata indexMetadata) {
         ByteSequence key = ByteSequence.from((SLASH + namespace + SLASH + Key.INDEX + SLASH + indexMetadata.getName())
                 .getBytes(StandardCharsets.UTF_8));
-        long epoch = indexMetadata.getEpoch();
+        Long epoch = indexMetadata.getEpoch();
         try {
             indexMetadata.setEpoch(null);
             var kv = client.getKVClient();
