@@ -3,11 +3,20 @@ package com.github.wxk6b1203.metadata.provider;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 
 public abstract class MetadataProvider {
+    public interface Key {
+        String INDEX = "index";
+        String TYPE = "type";
+        String INDEX_NAME = "index_name";
+    }
     public String name() {
         return this.getClass().getSimpleName();
     }
 
+    // Retrieve the index metadata by index name, return null if not found
+    // Any implementation should ensure thread-safety
     public abstract IndexMetadata get(String indexName);
 
-    public abstract int store(IndexMetadata indexMetadata);
+    // Store the index metadata, return the mod revision if success, otherwise return -1
+    // Any implementation should ensure idempotency
+    public abstract long store(IndexMetadata indexMetadata);
 }
