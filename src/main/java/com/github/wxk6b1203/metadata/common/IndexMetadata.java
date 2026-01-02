@@ -15,7 +15,7 @@ import java.time.LocalDateTime;
 @Accessors(chain = true)
 public class IndexMetadata implements Serializable {
     private String name;
-    private long epoch;
+    private Long epoch;
     private IndexMappings mappings;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

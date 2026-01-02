@@ -1,5 +1,6 @@
 package com.github.wxk6b1203.metadata.provider.etcd;
 
+import com.github.wxk6b1203.errors.StorageException;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.MetadataProvider;
 import io.etcd.jetcd.ByteSequence;
@@ -72,19 +73,14 @@ public class EtcdMetadataProvider extends MetadataProvider {
                 .getBytes(StandardCharsets.UTF_8));
         long epoch = indexMetadata.getEpoch();
         try {
-            indexMetadata.setEpoch(0);
+            indexMetadata.setEpoch(null);
             var kv = client.getKVClient();
-            var storeMeta = Op.put(key,
-                    ByteSequence.from(indexMetadata.toString().getBytes(StandardCharsets.UTF_8)),
-                    io.etcd.jetcd.options.PutOption.DEFAULT);
-            var txnResp = kv.txn().Then(storeMeta).commit().get();
-            if (txnResp.isSucceeded() && !txnResp.getPutResponses().isEmpty()) {
-                epoch = txnResp.getPutResponses().getFirst().getHeader().getRevision();
-                return epoch;
-            }
-            return -1;
+            var ret = kv.put(key, ByteSequence.from(indexMetadata.json())).get();
+            return ret.getHeader().getRevision();
         } catch (Exception e) {
-            return -1;
+            StorageException ex = new StorageException("Failed to store index metadata: " + e.getMessage());
+            ex.initCause(e);
+            throw ex;
         } finally {
             indexMetadata.setEpoch(epoch);
         }
