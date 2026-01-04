@@ -1,0 +1,7 @@
+dependencyResolutionManagement {
+    versionCatalogs {
+        deps {
+            from(files('../versions.toml'))
+        }
+    }
+}

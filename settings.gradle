@@ -7,3 +7,6 @@ dependencyResolutionManagement {
         }
     }
 }
+include 'core'
+include 'generator'
+include 'server'

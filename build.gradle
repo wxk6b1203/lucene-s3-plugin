@@ -8,6 +8,7 @@ version = '1.0-SNAPSHOT'
 
 repositories {
     mavenCentral()
+    gradlePluginPortal()
     maven {
         url 'https://jitpack.io'
     }
@@ -30,22 +31,6 @@ dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-
-    compileOnly deps.lombok
-    annotationProcessor deps.lombok
-    testCompileOnly deps.lombok
-    testAnnotationProcessor deps.lombok
-
-    implementation deps.lucene.core
-    implementation deps.lucene.analyzers.common
-    implementation deps.lucene.query.parser
-    implementation deps.roaringbitmap
-    implementation platform(deps.awssdk.bom)
-    implementation deps.awssdk.s3
-    implementation deps.jetcd.core
-    implementation deps.jackson.core
-    implementation deps.jackson.databind
-    implementation deps.picocli
 }
 
 test {

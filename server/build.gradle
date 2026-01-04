@@ -1,0 +1,28 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.github.wxk6b1203'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    compileOnly deps.lombok
+    annotationProcessor deps.lombok
+    testCompileOnly deps.lombok
+    testAnnotationProcessor deps.lombok
+
+    implementation deps.picocli
+}
+
+test {
+    useJUnitPlatform()
+}
