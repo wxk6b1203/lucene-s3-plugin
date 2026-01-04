@@ -3,6 +3,7 @@ package com.github.wxk6b1203.metadata.provider.etcd;
 import com.github.wxk6b1203.errors.StorageException;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.MetadataProvider;
+import com.github.wxk6b1203.metadata.provider.annotations.Provider;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import lombok.Builder;
@@ -10,6 +11,7 @@ import lombok.Data;
 
 import java.nio.charset.StandardCharsets;
 
+@Provider(value = "etcd")
 public class EtcdMetadataProvider extends MetadataProvider {
     public static final String SLASH = "/";
 

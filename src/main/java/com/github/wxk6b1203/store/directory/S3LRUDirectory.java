@@ -1,4 +1,4 @@
-package com.github.wxk6b1203.store;
+package com.github.wxk6b1203.store.directory;
 
 import com.github.wxk6b1203.metadata.provider.MetadataProvider;
 import org.apache.lucene.store.*;

@@ -6,6 +6,7 @@ ratis = "3.2.1"
 jetcd = "0.8.6"
 lombok = "1.18.42"
 jackson = "3.0.3"
+picocli = "4.7.7"
 
 [libraries]
 lucene-core = { module = "org.apache.lucene:lucene-core", version.ref = "lucene" }
@@ -20,3 +21,4 @@ jetcd-core = { module = "io.etcd:jetcd-core", version.ref = "jetcd" }
 lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
 jackson-databind = { module = "tools.jackson.core:jackson-databind", version.ref = "jackson" }
 jackson-core = { module = "tools.jackson.core:jackson-core", version.ref = "jackson" }
+picocli = { module = "info.picocli:picocli", version.ref = "picocli" }

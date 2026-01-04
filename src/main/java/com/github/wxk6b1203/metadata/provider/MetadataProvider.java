@@ -8,9 +8,6 @@ public abstract class MetadataProvider {
         String TYPE = "type";
         String INDEX_NAME = "index_name";
     }
-    public String name() {
-        return this.getClass().getSimpleName();
-    }
 
     // Retrieve the index metadata by index name, return null if not found
     // Any implementation should ensure thread-safety

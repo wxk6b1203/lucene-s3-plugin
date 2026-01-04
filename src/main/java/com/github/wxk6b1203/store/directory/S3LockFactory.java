@@ -1,4 +1,4 @@
-package com.github.wxk6b1203.store;
+package com.github.wxk6b1203.store.directory;
 
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.Lock;
