@@ -21,6 +21,9 @@ dependencies {
     testAnnotationProcessor deps.lombok
 
     implementation deps.picocli
+    implementation deps.slf4j.api
+    implementation deps.logback.classic
+    implementation deps.logback.core
 }
 
 test {

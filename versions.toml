@@ -7,6 +7,8 @@ jetcd = "0.8.6"
 lombok = "1.18.42"
 jackson = "3.0.3"
 picocli = "4.7.7"
+slf4j = "2.0.17"
+logback = "1.5.23"
 
 [libraries]
 lucene-core = { module = "org.apache.lucene:lucene-core", version.ref = "lucene" }
@@ -22,3 +24,6 @@ lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
 jackson-databind = { module = "tools.jackson.core:jackson-databind", version.ref = "jackson" }
 jackson-core = { module = "tools.jackson.core:jackson-core", version.ref = "jackson" }
 picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+logback-core = { module = "ch.qos.logback:logback-core", version.ref = "logback" }
