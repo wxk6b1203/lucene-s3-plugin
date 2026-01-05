@@ -3,9 +3,7 @@ package com.github.wxk6b1203.executor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -73,5 +71,15 @@ class ScaleFirstExecutorTest {
             TimeUnit.MILLISECONDS.sleep(20);
         }
         assertEquals(expected, executor.getQueue().size(), "queue size did not reach expected value in time");
+    }
+
+    @Test
+    public void testVirtualThread() {
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            executor.execute(() -> {
+                System.out.println("Hello from a virtual thread!");
+            });
+        }
+
     }
 }

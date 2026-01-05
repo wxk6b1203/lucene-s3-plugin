@@ -16,9 +16,12 @@ public class S3LRUDirectory extends BaseDirectory {
     private final MetadataProvider metadataProvider;
     private final S3Client s3Client;
     private final Path path;
+    private final String bucket;
+
 
     public S3LRUDirectory(
             Path path,
+            String bucket,
             long maxChunkSize,
             MetadataProvider metadataProvider,
             S3LockFactory s3LockFactory,
@@ -27,6 +30,7 @@ public class S3LRUDirectory extends BaseDirectory {
         this.metadataProvider = metadataProvider;
         this.s3Client = s3Client;
         this.path = path;
+        this.bucket = bucket;
     }
 
     @Override
