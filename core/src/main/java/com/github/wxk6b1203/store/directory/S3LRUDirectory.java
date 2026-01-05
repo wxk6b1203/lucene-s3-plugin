@@ -8,19 +8,25 @@ import org.apache.lucene.store.IndexOutput;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Collection;
 import java.util.Set;
 
 public class S3LRUDirectory extends BaseDirectory {
     private final MetadataProvider metadataProvider;
     private final S3Client s3Client;
+    private final Path path;
 
-    public S3LRUDirectory(MetadataProvider metadataProvider,
-                          S3LockFactory s3LockFactory,
-                          S3Client s3Client) {
+    public S3LRUDirectory(
+            Path path,
+            long maxChunkSize,
+            MetadataProvider metadataProvider,
+            S3LockFactory s3LockFactory,
+            S3Client s3Client) {
         super(s3LockFactory);
         this.metadataProvider = metadataProvider;
         this.s3Client = s3Client;
+        this.path = path;
     }
 
     @Override
