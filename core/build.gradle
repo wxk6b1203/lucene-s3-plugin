@@ -47,8 +47,6 @@ dependencies {
     implementation platform(deps.awssdk.bom)
     implementation deps.awssdk.s3
     implementation deps.jetcd.core
-    implementation deps.jackson.core
-    implementation deps.jackson.databind
 }
 
 test {

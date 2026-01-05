@@ -47,7 +47,7 @@ public class JsonUtil {
         return result;
     }
 
-    private static void flattenMap(String prefix, Map<?, ?> raw, Map<String, Object> result) {
+    static void flattenMap(String prefix, Map<?, ?> raw, Map<String, Object> result) {
         if (raw == null || raw.isEmpty()) {
             return;
         }
@@ -133,11 +133,5 @@ public class JsonUtil {
             }
         }
         return false;
-    }
-
-    public static void main(String[] args) {
-        String json = "{\"a\":1,\"b\":{\"c\":\"GG\",\"d\":{\"e\":[1,2,{\"G\":3}]}}}";
-        Map<String, Object> flattened = readValueAsFlattenedMap(json);
-        System.out.println(flattened);
     }
 }
