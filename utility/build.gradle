@@ -1,5 +1,5 @@
 plugins {
-    id 'java'
+    id 'java-library'
 }
 
 group = 'com.github.wxk6b1203'
@@ -14,9 +14,9 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
-    implementation deps.jackson.core
-    implementation deps.jackson.databind
-    implementation deps.jackson.dataformat.yaml
+    api deps.jackson.core
+    api deps.jackson.databind
+    api deps.jackson.dataformat.yaml
 }
 
 test {

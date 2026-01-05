@@ -6,36 +6,55 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 
-public class S3LRUDirectory extends BaseDirectory {
-    private final MetadataProvider metadataProvider;
+public class S3Directory extends BaseDirectory {
     private final S3Client s3Client;
-    private final Path path;
     private final String bucket;
 
 
-    public S3LRUDirectory(
-            Path path,
+    public S3Directory(
             String bucket,
-            long maxChunkSize,
-            MetadataProvider metadataProvider,
             S3LockFactory s3LockFactory,
             S3Client s3Client) {
         super(s3LockFactory);
-        this.metadataProvider = metadataProvider;
         this.s3Client = s3Client;
-        this.path = path;
         this.bucket = bucket;
+    }
+
+    private String location() {
+        return Hierarchy.DATA.getPath() + "/";
     }
 
     @Override
     public String[] listAll() throws IOException {
-        return new String[0];
+        try {
+            List<String> fileNames = new ArrayList<>();
+            String prefix = location();
+            var paginator = s3Client.listObjectsV2Paginator(b -> b
+                    .bucket(bucket)
+                    .prefix(prefix)
+                    .delimiter("/")); // 仅当前层
+            paginator.stream()
+                    .flatMap(r -> r.contents().stream())
+                    .map(S3Object::key)
+                    .filter(k -> !k.equals(prefix))
+                    .filter(k -> !k.endsWith("/"))
+                    .map(k -> k.substring(prefix.length()))
+                    .forEach(fileNames::add);
+            return fileNames.toArray(new String[0]);
+        } catch (Exception e) {
+            throw new IOException("Failed to list objects from S3", e);
+        }
     }
 
     @Override
