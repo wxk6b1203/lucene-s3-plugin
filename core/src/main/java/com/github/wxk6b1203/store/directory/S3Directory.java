@@ -9,14 +9,13 @@ import org.apache.lucene.store.IndexOutput;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 
 public class S3Directory extends BaseDirectory {
     private final S3Client s3Client;
@@ -41,6 +40,7 @@ public class S3Directory extends BaseDirectory {
 
     @Override
     public String[] listAll() throws IOException {
+        ensureOpen();
         try {
             List<String> fileNames = new ArrayList<>();
             String prefix = location();
@@ -55,6 +55,7 @@ public class S3Directory extends BaseDirectory {
                     .filter(k -> !k.endsWith("/"))
                     .map(k -> k.substring(prefix.length()))
                     .forEach(fileNames::add);
+            fileNames.sort(String::compareTo);
             return fileNames.toArray(new String[0]);
         } catch (Exception e) {
             throw new IOException("Failed to list objects from S3", e);
@@ -63,7 +64,25 @@ public class S3Directory extends BaseDirectory {
 
     @Override
     public void deleteFile(String name) throws IOException {
-
+        ensureOpen();
+        String key = location() + name;
+        try {
+            var obj = s3Client.getObject(b -> b
+                    .bucket(bucket).key(key));
+            if (obj != null) {
+                s3Client.deleteObject(b -> b
+                        .bucket(bucket)
+                        .key(key));
+            } else {
+                throw new NoSuchFileException(name);
+            }
+        } catch (NoSuchKeyException e) {
+            NoSuchFileException ex = new NoSuchFileException(name);
+            ex.initCause(e);
+            throw ex;
+        } catch (Exception e) {
+            throw new IOException("Failed to delete object from S3: " + name, e);
+        }
     }
 
     @Override
