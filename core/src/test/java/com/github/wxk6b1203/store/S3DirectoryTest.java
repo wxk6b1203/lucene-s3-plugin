@@ -8,8 +8,6 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3Configuration;
-import software.amazon.awssdk.services.s3.endpoints.S3EndpointProvider;
-import software.amazon.awssdk.services.s3.endpoints.internal.DefaultS3EndpointProvider;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.io.IOException;
@@ -43,9 +41,9 @@ public class S3DirectoryTest {
         // AWS_SECRET_ACCESS_KEY
         // AWS_REGION
         S3Directory s3Directory = new S3Directory(testIndexName, bucket, new S3LockFactory(client), client);
-        PutObjectRequest putObjectRequest = PutObjectRequest.builder().bucket(bucket).key(  testIndexName + Common.SLASH + Hierarchy.DATA.path + Common.SLASH + "test_file").build();
+        PutObjectRequest putObjectRequest = PutObjectRequest.builder().bucket(bucket).key(testIndexName + Common.SLASH + Hierarchy.DATA.path + Common.SLASH + "test_file").build();
         RequestBody body = RequestBody.fromString("value");
-        var put = client.putObject(putObjectRequest, body);
+        client.putObject(putObjectRequest, body);
         s3Directory.deleteFile("test_file");
 
         try {
@@ -53,5 +51,8 @@ public class S3DirectoryTest {
         } catch (NoSuchFileException ignored) {
 
         }
+
+        client.putObject(putObjectRequest, body);
+        System.out.println(s3Directory.fileLength("test_file"));
     }
 }

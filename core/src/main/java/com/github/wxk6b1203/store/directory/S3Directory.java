@@ -1,37 +1,44 @@
 package com.github.wxk6b1203.store.directory;
 
 import com.github.wxk6b1203.common.Common;
-import com.github.wxk6b1203.metadata.provider.MetadataProvider;
 import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
-import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.IOException;
 import java.nio.file.NoSuchFileException;
-import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 public class S3Directory extends BaseDirectory {
     private final S3Client s3Client;
     private final String bucket;
     private final String indexName;
+    private final Executor executor;
 
+    private final Set<String> pendingDeletes = ConcurrentHashMap.newKeySet();
 
     public S3Directory(
             String indexName,
             String bucket,
             S3LockFactory s3LockFactory,
-            S3Client s3Client) {
+            S3Client s3Client
+    ) {
         super(s3LockFactory);
+        Executor executor1;
         this.indexName = indexName;
         this.bucket = bucket;
         this.s3Client = s3Client;
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     private String location() {
@@ -54,7 +61,11 @@ public class S3Directory extends BaseDirectory {
                     .filter(k -> !k.equals(prefix))
                     .filter(k -> !k.endsWith("/"))
                     .map(k -> k.substring(prefix.length()))
-                    .forEach(fileNames::add);
+                    .forEach((e) -> {
+                        if (!pendingDeletes.contains(e)) {
+                            fileNames.add(e);
+                        }
+                    });
             fileNames.sort(String::compareTo);
             return fileNames.toArray(new String[0]);
         } catch (Exception e) {
@@ -65,14 +76,21 @@ public class S3Directory extends BaseDirectory {
     @Override
     public void deleteFile(String name) throws IOException {
         ensureOpen();
+        if (pendingDeletes.contains(name)) {
+            throw new NoSuchFileException("file \"" + name + "\" is already pending delete");
+        }
         String key = location() + name;
         try {
             var obj = s3Client.getObject(b -> b
                     .bucket(bucket).key(key));
             if (obj != null) {
-                s3Client.deleteObject(b -> b
-                        .bucket(bucket)
-                        .key(key));
+                pendingDeletes.add(name);
+                this.executor.execute(() -> {
+                    s3Client.deleteObject(b -> b
+                            .bucket(bucket)
+                            .key(key));
+                    pendingDeletes.remove(name);
+                });
             } else {
                 throw new NoSuchFileException(name);
             }
@@ -87,7 +105,19 @@ public class S3Directory extends BaseDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        return 0;
+        ensureOpen();
+        String key = location() + name;
+        try {
+            var obj = s3Client.headObject(b -> b
+                    .bucket(bucket).key(key));
+            return obj.contentLength();
+        } catch (NoSuchKeyException e) {
+            NoSuchFileException ex = new NoSuchFileException(name);
+            ex.initCause(e);
+            throw ex;
+        } catch (Exception e) {
+            throw new IOException("Failed to get object length from S3: " + name, e);
+        }
     }
 
     @Override
@@ -122,7 +152,7 @@ public class S3Directory extends BaseDirectory {
 
     @Override
     public void close() throws IOException {
-
+        isOpen = false;
     }
 
     @Override
