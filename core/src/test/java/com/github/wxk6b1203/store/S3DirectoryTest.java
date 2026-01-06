@@ -14,7 +14,13 @@ public class S3DirectoryTest {
     @Test
     public void testS3ListAll() throws IOException {
         S3Client client = S3Client.builder().endpointOverride(URI.create("https://oss-cn-shanghai.aliyuncs.com")).build();
-        S3Directory s3Directory = new S3Directory("bee-all", new S3LockFactory(client), client);
+        String bucket = System.getenv("S3_BUCKET");
+        String testIndexName = System.getenv("TEST_INDEX_NAME");
+        // need to add:
+        // AWS_ACCESS_KEY_ID
+        // AWS_SECRET_ACCESS_KEY
+        // AWS_REGION
+        S3Directory s3Directory = new S3Directory(testIndexName, bucket, new S3LockFactory(client), client);
         var allObjects = s3Directory.listAll();
         for (var obj : allObjects) {
             System.out.println(obj);

@@ -35,6 +35,9 @@ dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation deps.slf4j.api
+    testImplementation deps.logback.classic
+    testImplementation deps.logback.core
 
     compileOnly deps.lombok
     annotationProcessor deps.lombok
@@ -48,6 +51,9 @@ dependencies {
     implementation platform(deps.awssdk.bom)
     implementation deps.awssdk.s3
     implementation deps.jetcd.core
+    implementation deps.slf4j.api
+    implementation deps.logback.classic
+    implementation deps.logback.core
 }
 
 test {

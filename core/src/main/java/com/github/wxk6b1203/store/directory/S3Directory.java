@@ -1,5 +1,6 @@
 package com.github.wxk6b1203.store.directory;
 
+import com.github.wxk6b1203.common.Common;
 import com.github.wxk6b1203.metadata.provider.MetadataProvider;
 import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.IOContext;
@@ -20,19 +21,22 @@ import java.util.Set;
 public class S3Directory extends BaseDirectory {
     private final S3Client s3Client;
     private final String bucket;
+    private final String indexName;
 
 
     public S3Directory(
+            String indexName,
             String bucket,
             S3LockFactory s3LockFactory,
             S3Client s3Client) {
         super(s3LockFactory);
-        this.s3Client = s3Client;
+        this.indexName = indexName;
         this.bucket = bucket;
+        this.s3Client = s3Client;
     }
 
     private String location() {
-        return Hierarchy.DATA.getPath() + "/";
+        return indexName + Common.SLASH + Hierarchy.DATA.getPath() + Common.SLASH;
     }
 
     @Override
@@ -43,7 +47,7 @@ public class S3Directory extends BaseDirectory {
             var paginator = s3Client.listObjectsV2Paginator(b -> b
                     .bucket(bucket)
                     .prefix(prefix)
-                    .delimiter("/")); // 仅当前层
+                    .delimiter(Common.SLASH)); // 仅当前层
             paginator.stream()
                     .flatMap(r -> r.contents().stream())
                     .map(S3Object::key)
