@@ -17,13 +17,14 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class S3Directory extends BaseDirectory {
     private final S3Client s3Client;
     private final String bucket;
     private final String indexName;
-    private final Executor executor;
+    private static final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
     private final Set<String> pendingDeletes = ConcurrentHashMap.newKeySet();
 
@@ -34,11 +35,9 @@ public class S3Directory extends BaseDirectory {
             S3Client s3Client
     ) {
         super(s3LockFactory);
-        Executor executor1;
         this.indexName = indexName;
         this.bucket = bucket;
         this.s3Client = s3Client;
-        this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     private String location() {
@@ -85,7 +84,7 @@ public class S3Directory extends BaseDirectory {
                     .bucket(bucket).key(key));
             if (obj != null) {
                 pendingDeletes.add(name);
-                this.executor.execute(() -> {
+                executor.execute(() -> {
                     s3Client.deleteObject(b -> b
                             .bucket(bucket)
                             .key(key));
@@ -122,6 +121,8 @@ public class S3Directory extends BaseDirectory {
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
+        ensureOpen();
+
         return null;
     }
 
@@ -157,6 +158,6 @@ public class S3Directory extends BaseDirectory {
 
     @Override
     public Set<String> getPendingDeletions() throws IOException {
-        return Set.of();
+        return pendingDeletes;
     }
 }
