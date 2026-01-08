@@ -5,21 +5,26 @@ import org.apache.lucene.util.BitUtil;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.util.Arrays;
+import java.util.zip.CRC32;
 
 public class XBufferedOutputStream extends ByteArrayOutputStream {
+    CRC32 crc = new CRC32();
     public void writeShort(short i) {
-        ensureCapacity(count + 1);
+        ensureCapacity(count + 2);
         BitUtil.VH_LE_SHORT.set(buf, count, i);
+        crc.update(buf, count, 2);
         count += Short.BYTES;
     }
     public void writeInt(int i) {
-        ensureCapacity(count + 1);
+        ensureCapacity(count + 4);
         BitUtil.VH_LE_INT.set(buf, count, i);
+        crc.update(buf, count, 4);
         count += Integer.BYTES;
     }
     public void writeLong(long l) {
-        ensureCapacity(count + 1);
+        ensureCapacity(count + 8);
         BitUtil.VH_LE_LONG.set(buf, count, l);
+        crc.update(buf, count, 8);
         count += Long.BYTES;
     }
 
@@ -45,5 +50,9 @@ public class XBufferedOutputStream extends ByteArrayOutputStream {
         }
 
         buf = Arrays.copyOf(buf, newCapacity);
+    }
+
+    public long checksum() {
+        return crc.getValue();
     }
 }

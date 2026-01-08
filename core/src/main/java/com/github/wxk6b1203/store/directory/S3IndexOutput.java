@@ -2,19 +2,19 @@ package com.github.wxk6b1203.store.directory;
 
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.OutputStreamIndexOutput;
+import org.apache.lucene.util.BitUtil;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.BitSet;
 import java.util.zip.CRC32;
 import java.util.zip.CheckedOutputStream;
 
 public class S3IndexOutput extends IndexOutput {
     private final S3Client s3Client;
-    private final XBufferedOutputStream bufferOutputStream;
-    private final CRC32 crc = new CRC32();
-    private final CheckedOutputStream checkedOutputStream;
+    private final XBufferedOutputStream bufferedOutputStream;
 
     /**
      * Sole constructor. resourceDescription should be non-null, opaque string describing this
@@ -26,8 +26,7 @@ public class S3IndexOutput extends IndexOutput {
     protected S3IndexOutput(String resourceDescription, String name, S3Client s3Client) {
         super(resourceDescription, name);
         this.s3Client = s3Client;
-        this.bufferOutputStream = new XBufferedOutputStream();
-        this.checkedOutputStream = new CheckedOutputStream(this.bufferOutputStream, crc);
+        this.bufferedOutputStream = new XBufferedOutputStream();
     }
 
 
@@ -38,17 +37,32 @@ public class S3IndexOutput extends IndexOutput {
 
     @Override
     public long getFilePointer() {
-        return 0;
+        return bufferedOutputStream.size();
     }
 
     @Override
     public long getChecksum() throws IOException {
-        return 0;
+        return bufferedOutputStream.checksum();
     }
 
     @Override
     public void writeByte(byte b) throws IOException {
+        bufferedOutputStream.write(b);
+    }
 
+    @Override
+    public void writeInt(int i) throws IOException {
+        bufferedOutputStream.writeInt(i);
+    }
+
+    @Override
+    public void writeShort(short i) throws IOException {
+        bufferedOutputStream.writeShort(i);
+    }
+
+    @Override
+    public void writeLong(long i) throws IOException {
+        bufferedOutputStream.writeLong(i);
     }
 
     @Override
