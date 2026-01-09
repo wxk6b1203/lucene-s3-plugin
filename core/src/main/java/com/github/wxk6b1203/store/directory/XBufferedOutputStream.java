@@ -1,30 +1,54 @@
 package com.github.wxk6b1203.store.directory;
 
 import org.apache.lucene.util.BitUtil;
+import org.jspecify.annotations.NonNull;
 
-import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.zip.CRC32;
 
-public class XBufferedOutputStream extends ByteArrayOutputStream {
+public class XBufferedOutputStream extends OutputStream {
+    /**
+     * buffer where data is stored.
+     */
+    protected byte[] buf;
+    /**
+     * The number of valid bytes in the buffer.
+     */
+    protected int count;
+
     CRC32 crc = new CRC32();
+
+    public XBufferedOutputStream() {
+        this(128);
+    }
+
+    public XBufferedOutputStream(int size) {
+        if (size < 0) {
+            throw new IllegalArgumentException("Negative initial size: "
+                    + size);
+        }
+        buf = new byte[size];
+    }
+
     public void writeShort(short i) {
-        ensureCapacity(count + 2);
+        ensureCapacity(count + Short.BYTES);
         BitUtil.VH_LE_SHORT.set(buf, count, i);
-        crc.update(buf, count, 2);
+        crc.update(buf, count, Short.BYTES);
         count += Short.BYTES;
     }
+
     public void writeInt(int i) {
-        ensureCapacity(count + 4);
+        ensureCapacity(count + Integer.BYTES);
         BitUtil.VH_LE_INT.set(buf, count, i);
-        crc.update(buf, count, 4);
+        crc.update(buf, count, Integer.BYTES);
         count += Integer.BYTES;
     }
+
     public void writeLong(long l) {
-        ensureCapacity(count + 8);
+        ensureCapacity(count + Long.BYTES);
         BitUtil.VH_LE_LONG.set(buf, count, l);
-        crc.update(buf, count, 8);
+        crc.update(buf, count, Long.BYTES);
         count += Long.BYTES;
     }
 
@@ -50,6 +74,38 @@ public class XBufferedOutputStream extends ByteArrayOutputStream {
         }
 
         buf = Arrays.copyOf(buf, newCapacity);
+    }
+
+    @Override
+    public void write(int b) {
+        ensureCapacity(count + 1);
+        buf[count] = (byte) b;
+        count += 1;
+    }
+
+    @Override
+    public void write(byte @NonNull [] b, int off, int len) {
+        ensureCapacity(count + len);
+        System.arraycopy(b, off, buf, count, len);
+        count += len;
+    }
+
+    public int size() {
+        return count;
+    }
+
+    public byte[] toByteArray() {
+        return Arrays.copyOf(buf, count);
+    }
+
+    @Override
+    public void close() {
+        buf = new byte[32];
+        count = 0;
+    }
+
+    public void writeBytes(byte[] b) {
+        write(b, 0, b.length);
     }
 
     public long checksum() {
