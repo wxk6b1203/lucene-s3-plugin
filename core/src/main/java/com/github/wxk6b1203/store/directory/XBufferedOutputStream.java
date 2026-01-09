@@ -1,8 +1,11 @@
 package com.github.wxk6b1203.store.directory;
 
+import com.github.wxk6b1203.common.Common;
 import org.apache.lucene.util.BitUtil;
 import org.jspecify.annotations.NonNull;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.zip.CRC32;
@@ -17,18 +20,27 @@ public class XBufferedOutputStream extends OutputStream {
      */
     protected int count;
 
+    private final String bucket;
+    private final String index;
+    private final String name;
+    private final software.amazon.awssdk.services.s3.S3Client s3Client;
+
     CRC32 crc = new CRC32();
 
-    public XBufferedOutputStream() {
-        this(128);
+    public XBufferedOutputStream(String bucket, String index, String name, software.amazon.awssdk.services.s3.S3Client s3Client) {
+        this(128, bucket, index, name, s3Client);
     }
 
-    public XBufferedOutputStream(int size) {
+    public XBufferedOutputStream(int size, String bucket, String index, String name, software.amazon.awssdk.services.s3.S3Client s3Client) {
         if (size < 0) {
             throw new IllegalArgumentException("Negative initial size: "
                     + size);
         }
         buf = new byte[size];
+        this.bucket = bucket;
+        this.index = index;
+        this.name = name;
+        this.s3Client = s3Client;
     }
 
     public void writeShort(short i) {
@@ -110,5 +122,25 @@ public class XBufferedOutputStream extends OutputStream {
 
     public long checksum() {
         return crc.getValue();
+    }
+
+    private void clear() {
+        // TODO: make this as chunk size
+        if (buf.length > 8192) {
+            buf = new byte[8192];
+            count = 0;
+            return;
+        }
+        Arrays.fill(buf, (byte) 0);
+        count = 0;
+    }
+
+    @Override
+    public void flush() {
+        byte[] data = this.toByteArray();
+        String key = index + Common.SLASH + Hierarchy.DATA.getPath() + Common.SLASH + name;
+        PutObjectRequest request = PutObjectRequest.builder().bucket(bucket).key(key).build();
+        s3Client.putObject(request, software.amazon.awssdk.core.sync.RequestBody.fromBytes(data));
+        clear();
     }
 }

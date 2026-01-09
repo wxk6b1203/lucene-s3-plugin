@@ -1,43 +1,50 @@
 package com.github.wxk6b1203.store.directory;
 
 import com.github.wxk6b1203.common.Common;
-import org.apache.lucene.store.BaseDirectory;
-import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.store.IndexOutput;
+import com.github.wxk6b1203.metadata.provider.MetadataProvider;
+import org.apache.lucene.store.*;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.IOException;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class S3Directory extends BaseDirectory {
+public class S3CachingDirectory extends BaseDirectory {
     private final S3Client s3Client;
     private final String bucket;
     private final String indexName;
+    private final MetadataProvider metadataProvider;
     private static final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
     private final Set<String> pendingDeletes = ConcurrentHashMap.newKeySet();
 
-    public S3Directory(
-            String indexName,
-            String bucket,
+    private Directory cachingDirectory;
+
+    public S3CachingDirectory(
+            S3DirectoryOptions options,
             S3LockFactory s3LockFactory,
-            S3Client s3Client
-    ) {
+            S3Client s3Client,
+            MetadataProvider metadataProvider
+    ) throws IOException {
         super(s3LockFactory);
-        this.indexName = indexName;
-        this.bucket = bucket;
+        this.indexName = options.indexName();
+        this.bucket = options.bucket();
         this.s3Client = s3Client;
+        this.metadataProvider = metadataProvider;
+        if (options.enableCaching()) {
+            this.cachingDirectory = new MMapDirectory(Path.of(options.basePath().toAbsolutePath().toString(), indexName, Hierarchy.DATA.getPath()));
+        } else {
+            this.cachingDirectory = new ByteBuffersDirectory();
+        }
     }
 
     private String location() {
@@ -122,8 +129,7 @@ public class S3Directory extends BaseDirectory {
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
         ensureOpen();
-
-        return null;
+        return new S3IndexOutput("S3IndexOutput(%s/%s)", bucket, indexName, name, s3Client);
     }
 
     @Override

@@ -25,19 +25,11 @@ public class S3IndexOutput extends IndexOutput {
      */
     protected S3IndexOutput(String resourceDescription, String bucket, String index, String name, S3Client s3Client) {
         super(resourceDescription, name);
-        this.bufferedOutputStream = new XBufferedOutputStream() {
+        this.bufferedOutputStream = new XBufferedOutputStream(bucket, index, name, s3Client) {
             @Override
             public void close() {
                 this.flush();
                 super.close();
-            }
-
-            @Override
-            public void flush() {
-                byte[] data = this.toByteArray();
-                String key = index + Common.SLASH + Hierarchy.DATA.getPath() + Common.SLASH + name;
-                PutObjectRequest request = PutObjectRequest.builder().bucket(bucket).key(key).build();
-                s3Client.putObject(request, software.amazon.awssdk.core.sync.RequestBody.fromBytes(data));
             }
         };
     }
