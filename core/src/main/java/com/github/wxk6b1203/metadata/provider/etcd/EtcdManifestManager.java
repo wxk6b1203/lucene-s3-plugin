@@ -1,8 +1,11 @@
 package com.github.wxk6b1203.metadata.provider.etcd;
 
 import com.github.wxk6b1203.errors.StorageException;
+import com.github.wxk6b1203.metadata.common.IndexFile;
+import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
+import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
-import com.github.wxk6b1203.metadata.provider.MetadataProvider;
+import com.github.wxk6b1203.metadata.provider.ManifestManager;
 import com.github.wxk6b1203.processor.metadata.annotation.Provider;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
@@ -10,9 +13,10 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 @Provider(value = "etcd")
-public class EtcdMetadataProvider extends MetadataProvider {
+public class EtcdManifestManager extends ManifestManager {
     public static final String SLASH = "/";
 
     private final Client client;
@@ -34,12 +38,12 @@ public class EtcdMetadataProvider extends MetadataProvider {
         PROTOBUF
     }
 
-    public EtcdMetadataProvider(Options opt, Client client) {
+    public EtcdManifestManager(Options opt, Client client) {
         this.namespace = opt.namespace;
         this.client = client;
     }
 
-    public EtcdMetadataProvider(Options opt) {
+    public EtcdManifestManager(Options opt) {
         this.namespace = opt.namespace;
         var cb = Client.builder().endpoints(opt.endpoints);
         if (opt.username != null && !opt.username.isEmpty()) {
@@ -90,5 +94,20 @@ public class EtcdMetadataProvider extends MetadataProvider {
         } finally {
             indexMetadata.setEpoch(epoch);
         }
+    }
+
+    @Override
+    public int createFile(IndexFile file) {
+        return 0;
+    }
+
+    @Override
+    public List<IndexFileMetadata> listAllClean() {
+        return List.of();
+    }
+
+    @Override
+    public List<IndexFileMetadata> listAll(List<IndexFileStatus> status) {
+        return List.of();
     }
 }
