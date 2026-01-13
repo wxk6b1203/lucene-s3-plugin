@@ -8,6 +8,8 @@ import lombok.Getter;
 @Getter
 @AllArgsConstructor
 public enum Hierarchy {
+    SHARED("_shared"),
+    WAL("_wal"),
     DATA("_data"),
     TEMP("_temp"),
     STATE("_state");

@@ -7,7 +7,7 @@ import com.github.wxk6b1203.metadata.common.IndexMetadata;
 
 import java.util.List;
 
-public abstract class ManifestManager {
+public abstract class ManifestMetadataManager {
     public interface Key {
         String INDEX = "index";
         String TYPE = "type";
@@ -22,9 +22,14 @@ public abstract class ManifestManager {
     // Any implementation should ensure idempotency
     public abstract long store(IndexMetadata indexMetadata);
 
-    public abstract int createFile(IndexFile file);
+    public abstract int commitFile(IndexFile file);
+
+    public abstract IndexFileMetadata get(String indexName, String fileName);
 
     public abstract List<IndexFileMetadata> listAllClean();
 
     public abstract List<IndexFileMetadata> listAll(List<IndexFileStatus> status);
+
+    public abstract IndexFileMetadata fileMetadata(String indexName, String name);
+
 }
