@@ -4,10 +4,13 @@ import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
+import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.store.*;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
@@ -80,15 +83,23 @@ public class S3CachingDirectory extends BaseDirectory {
         manifestManager.commit(indexName, names);
     }
 
+    /**
+     * @see IndexWriter#finishCommit()
+     * @throws IOException
+     */
     @Override
     public void syncMetaData() throws IOException {
-        // No-op
+        // TODO: sync local file status with remote manifest
+        // Notice: rename / move and another file operations will be handle when committing segments.
+        // this sync should ensure local metadata is consistent with remote manifest.
+        // see also: org.apache.lucene.index.IndexWriter.finishCommit
     }
 
     @Override
     public void rename(String source, String dest) throws IOException {
         ensureOpen();
-
+        Path dataPath = PathUtil.walDataPath(basePath, indexName).resolve(source);
+        Files.move(dataPath.resolve(source), dataPath.resolve(dest), StandardCopyOption.ATOMIC_MOVE);
     }
 
     @Override
