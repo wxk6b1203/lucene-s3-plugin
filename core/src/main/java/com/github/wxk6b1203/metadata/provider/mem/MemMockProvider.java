@@ -5,6 +5,7 @@ import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -12,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
+@Slf4j
 public class MemMockProvider extends ManifestMetadataManager {
     ConcurrentHashMap<String, IndexMetadata> indexes = new ConcurrentHashMap<>();
     ConcurrentHashMap<String, List<IndexFileMetadata>> files = new ConcurrentHashMap<>();
@@ -33,6 +35,20 @@ public class MemMockProvider extends ManifestMetadataManager {
             ));
         }
         throw new FileNotFoundException("File not found: " + name);
+    }
+
+    @Override
+    public synchronized void cleaningUp(String indexName, String name) {
+        String key = keyName(indexName, name);
+        List<IndexFileMetadata> metadata = files.get(key);
+        if (metadata != null && !metadata.isEmpty()) {
+            IndexFileMetadata last = metadata.getLast();
+            if (!IndexFileStatus.validTransition(last.status(), IndexFileStatus.CLEANING)) {
+                log.error("Invalid status transition from {} to {}", last.status(), IndexFileStatus.CLEANING);
+                return;
+            }
+
+        }
     }
 
     @Override

@@ -14,12 +14,16 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class ManifestManager {
     private final Path basePath;
     private final String bucket;
     private final S3Client s3Client;
     private final ManifestMetadataManager metadataManager;
+
+    private static final ExecutorService executor = Executors.newCachedThreadPool();
 
     public ManifestManager(S3DirectoryOptions options, S3Client s3Client, ManifestMetadataManager metadataManager) {
         this.basePath = options.basePath();
@@ -43,6 +47,8 @@ public class ManifestManager {
                 .bucket(bucket)
                 .key(PathUtil.s3ObjectKey(indexName, name))
                 .build();
+
+        metadataManager.cleaningUp(indexName, name);
 
         s3Client.deleteObject(deleteObjectRequest);
         // TODO: 1. mark as deleted in metadataManager

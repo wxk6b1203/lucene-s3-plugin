@@ -11,6 +11,8 @@ import java.util.List;
 public abstract class ManifestMetadataManager {
     public abstract void prepareDelete(String indexName, String name) throws IOException;
 
+    public abstract void cleaningUp(String indexName, String name);
+
     public interface Key {
         String INDEX = "index";
         String TYPE = "type";
