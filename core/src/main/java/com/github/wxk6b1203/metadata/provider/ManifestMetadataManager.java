@@ -5,9 +5,12 @@ import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 
+import java.io.IOException;
 import java.util.List;
 
 public abstract class ManifestMetadataManager {
+    public abstract void prepareDelete(String indexName, String name) throws IOException;
+
     public interface Key {
         String INDEX = "index";
         String TYPE = "type";

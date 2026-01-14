@@ -12,6 +12,7 @@ import io.etcd.jetcd.Client;
 import lombok.Builder;
 import lombok.Data;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
@@ -53,6 +54,11 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
             cb.password(ByteSequence.from(opt.password, StandardCharsets.UTF_8));
         }
         this.client = cb.build();
+    }
+
+    @Override
+    public void prepareDelete(String indexName, String name) throws IOException {
+
     }
 
     @Override

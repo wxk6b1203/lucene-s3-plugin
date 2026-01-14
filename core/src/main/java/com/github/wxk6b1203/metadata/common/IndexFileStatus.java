@@ -15,7 +15,10 @@ public enum IndexFileStatus {
     // CLEAN: the file has been uploaded to remote storage and has same content as local storage
     CLEAN(3),
     // PINNED: the file is pinned in local storage and will not be deleted
-    PINNED(4);
+    PINNED(4),
+    // DELETING: the file is being deleted from local and remote storage
+    DELETING(5)
+    ;
 
     @JsonValue
     public final int value;

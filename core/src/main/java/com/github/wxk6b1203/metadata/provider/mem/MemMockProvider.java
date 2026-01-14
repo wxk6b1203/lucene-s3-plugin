@@ -6,6 +6,8 @@ import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -13,6 +15,26 @@ import java.util.concurrent.ConcurrentHashMap;
 public class MemMockProvider extends ManifestMetadataManager {
     ConcurrentHashMap<String, IndexMetadata> indexes = new ConcurrentHashMap<>();
     ConcurrentHashMap<String, List<IndexFileMetadata>> files = new ConcurrentHashMap<>();
+
+    @Override
+    public synchronized void prepareDelete(String indexName, String name) throws IOException {
+        String key = keyName(indexName, name);
+        List<IndexFileMetadata> metadata = files.get(key);
+        if (metadata != null && !metadata.isEmpty()) {
+            IndexFileMetadata last = metadata.getLast();
+            metadata.add(new IndexFileMetadata(
+                    last.indexName(),
+                    last.name(),
+                    last.epoch() + 1,
+                    last.size(),
+                    last.checksum(),
+                    System.currentTimeMillis(),
+                    IndexFileStatus.DELETING
+            ));
+        }
+        throw new FileNotFoundException("File not found: " + name);
+    }
+
     @Override
     public IndexMetadata get(String indexName) {
         return indexes.get(indexName);
