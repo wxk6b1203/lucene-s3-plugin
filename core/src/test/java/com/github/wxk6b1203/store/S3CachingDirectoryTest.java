@@ -29,7 +29,7 @@ public class S3CachingDirectoryTest {
         // AWS_SECRET_ACCESS_KEY
         // AWS_REGION
         S3DirectoryOptions opt = new S3DirectoryOptions(Path.of("./"), bucket, testIndexName, true);
-        ManifestManager manager = new ManifestManager(new MemMockProvider());
+        ManifestManager manager = new ManifestManager(null, new MemMockProvider());
         S3CachingDirectory s3CachingDirectory = new S3CachingDirectory(opt, new S3LockFactory(client), manager);
         var allObjects = s3CachingDirectory.listAll();
         for (var obj : allObjects) {
@@ -47,7 +47,7 @@ public class S3CachingDirectoryTest {
         // AWS_SECRET_ACCESS_KEY
         // AWS_REGION
         S3DirectoryOptions opt = new S3DirectoryOptions(Path.of("./"), bucket, testIndexName, true);
-        ManifestManager manager = new ManifestManager(new MemMockProvider());
+        ManifestManager manager = new ManifestManager(null, new MemMockProvider());
         S3CachingDirectory s3CachingDirectory = new S3CachingDirectory(opt, new S3LockFactory(client), manager);
         PutObjectRequest putObjectRequest = PutObjectRequest.builder().bucket(bucket).key(testIndexName + Common.SLASH + Hierarchy.DATA.path + Common.SLASH + "test_file").build();
         RequestBody body = RequestBody.fromString("value");

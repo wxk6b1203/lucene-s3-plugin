@@ -3,6 +3,7 @@ package com.github.wxk6b1203.store.manifest;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
+import software.amazon.awssdk.services.s3.S3Client;
 
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -11,9 +12,11 @@ import java.util.List;
 import java.util.Set;
 
 public class ManifestManager {
+    private final S3Client s3Client;
     private final ManifestMetadataManager metadataManager;
 
-    public ManifestManager(ManifestMetadataManager metadataManager) {
+    public ManifestManager(S3Client s3Client, ManifestMetadataManager metadataManager) {
+        this.s3Client = s3Client;
         this.metadataManager = metadataManager;
     }
 
