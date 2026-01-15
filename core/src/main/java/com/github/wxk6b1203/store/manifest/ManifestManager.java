@@ -6,7 +6,7 @@ import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.directory.S3DirectoryOptions;
 import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -23,7 +23,7 @@ public class ManifestManager {
     private final S3Client s3Client;
     private final ManifestMetadataManager metadataManager;
 
-    private static final ExecutorService executor = Executors.newCachedThreadPool();
+    private static final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
     public ManifestManager(S3DirectoryOptions options, S3Client s3Client, ManifestMetadataManager metadataManager) {
         this.basePath = options.basePath();
@@ -43,14 +43,17 @@ public class ManifestManager {
             Files.delete(path.resolve(name));
         } catch (NoSuchFileException ignored) {}
 
-        DeleteObjectRequest deleteObjectRequest = DeleteObjectRequest.builder()
-                .bucket(bucket)
-                .key(PathUtil.s3ObjectKey(indexName, name))
-                .build();
-
         metadataManager.cleaningUp(indexName, name);
 
-        s3Client.deleteObject(deleteObjectRequest);
+        DeleteObjectsRequest deleteObjectsRequest = DeleteObjectsRequest.builder()
+                .bucket(bucket)
+                .delete(d -> d.objects(
+                        List.of(software.amazon.awssdk.services.s3.model.ObjectIdentifier.builder()
+                                .key(PathUtil.s3ObjectKey(indexName, name))
+                                .build())))
+                .build();
+
+        s3Client.deleteObjects(deleteObjectsRequest);
         // TODO: 1. mark as deleted in metadataManager
         //       2. delete from local storage
         //       3. delete from remote storage

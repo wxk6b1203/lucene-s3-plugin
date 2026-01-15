@@ -47,7 +47,6 @@ public class MemMockProvider extends ManifestMetadataManager {
                 log.error("Invalid status transition from {} to {}", last.status(), IndexFileStatus.CLEANING);
                 return;
             }
-
         }
     }
 
