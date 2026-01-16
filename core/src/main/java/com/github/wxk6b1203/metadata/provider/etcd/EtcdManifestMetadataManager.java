@@ -57,7 +57,17 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
     }
 
     @Override
-    public void prepareDelete(String indexName, String name) throws IOException {
+    public IndexFileMetadata prepareDelete(String indexName, String name) throws IOException {
+
+    }
+
+    @Override
+    public void cleaningUp(String indexName, String name) {
+
+    }
+
+    @Override
+    public void finishDelete(String indexName, String name) {
 
     }
 

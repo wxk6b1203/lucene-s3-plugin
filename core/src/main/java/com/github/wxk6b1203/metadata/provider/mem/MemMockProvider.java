@@ -19,12 +19,12 @@ public class MemMockProvider extends ManifestMetadataManager {
     ConcurrentHashMap<String, List<IndexFileMetadata>> files = new ConcurrentHashMap<>();
 
     @Override
-    public synchronized void prepareDelete(String indexName, String name) throws IOException {
+    public synchronized IndexFileMetadata prepareDelete(String indexName, String name) throws IOException {
         String key = keyName(indexName, name);
         List<IndexFileMetadata> metadata = files.get(key);
         if (metadata != null && !metadata.isEmpty()) {
             IndexFileMetadata last = metadata.getLast();
-            metadata.add(new IndexFileMetadata(
+            IndexFileMetadata deleteMetadata = new IndexFileMetadata(
                     last.indexName(),
                     last.name(),
                     last.epoch() + 1,
@@ -32,7 +32,9 @@ public class MemMockProvider extends ManifestMetadataManager {
                     last.checksum(),
                     System.currentTimeMillis(),
                     IndexFileStatus.DELETING
-            ));
+            );
+            metadata.add(deleteMetadata);
+            return deleteMetadata;
         }
         throw new FileNotFoundException("File not found: " + name);
     }
@@ -48,6 +50,11 @@ public class MemMockProvider extends ManifestMetadataManager {
                 return;
             }
         }
+    }
+
+    @Override
+    public void finishDelete(String indexName, String name) {
+
     }
 
     @Override

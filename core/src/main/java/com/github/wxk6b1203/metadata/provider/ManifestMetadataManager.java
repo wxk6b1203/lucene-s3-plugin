@@ -9,9 +9,11 @@ import java.io.IOException;
 import java.util.List;
 
 public abstract class ManifestMetadataManager {
-    public abstract void prepareDelete(String indexName, String name) throws IOException;
+    public abstract IndexFileMetadata prepareDelete(String indexName, String name) throws IOException;
 
     public abstract void cleaningUp(String indexName, String name);
+
+    public abstract void finishDelete(String indexName, String name);
 
     public interface Key {
         String INDEX = "index";
