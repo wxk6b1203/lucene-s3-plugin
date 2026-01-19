@@ -1,16 +1,21 @@
 package com.github.wxk6b1203.store.directory;
 
+import com.github.wxk6b1203.metadata.common.CommitingIndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.store.*;
+import org.apache.lucene.store.BaseDirectory;
+import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.IndexOutput;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
@@ -80,7 +85,14 @@ public class S3CachingDirectory extends BaseDirectory {
 
     @Override
     public void sync(Collection<String> names) throws IOException {
-        manifestManager.commit(indexName, names);
+        ensureOpen();
+        // get all file exist and checksum for manifest manager
+        List<CommitingIndexFile> files = new ArrayList<>();
+        for (String name : names) {
+            Path filePath = PathUtil.walDataPath(basePath, indexName).resolve(name);
+            files.add(new CommitingIndexFile(indexName, filePath));
+        }
+        manifestManager.commit(files);
     }
 
     /**

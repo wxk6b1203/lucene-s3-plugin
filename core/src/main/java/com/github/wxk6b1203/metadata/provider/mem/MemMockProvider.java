@@ -53,7 +53,7 @@ public class MemMockProvider extends ManifestMetadataManager {
     }
 
     @Override
-    public void finishDelete(String indexName, String name) {
+    public void finishDelete(String indexName, long epoch, String name) {
 
     }
 

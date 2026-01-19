@@ -1,5 +1,7 @@
 package com.github.wxk6b1203.store.manifest;
 
+import com.github.wxk6b1203.metadata.common.CommitingIndexFile;
+import com.github.wxk6b1203.metadata.common.IndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
@@ -114,7 +116,7 @@ public class ManifestManager {
         s3Client.deleteObjects(deleteObjectsRequest);
 
         for (DeleteTask task : tasks) {
-            metadataManager.finishDelete(task.indexName(), task.name());
+            metadataManager.finishDelete(task.indexName(), task.epoch() , task.name());
         }
     }
 
@@ -153,10 +155,11 @@ public class ManifestManager {
         return fileMetadata;
     }
 
-    public void commit(String indexName, Collection<String> names) {
-        for (String name : names) {
+    public void commit(Collection<CommitingIndexFile> indexFiles) throws IOException {
+        for (CommitingIndexFile indexFile : indexFiles) {
+            long size = Files.size(indexFile.filePath());
 
-            metadataManager.commitFile(cleanMetadata);
+            metadataManager.commitFile(new IndexFile(indexFile.indexName(), indexFile.filePath().getFileName().toString(), size, 0));
         }
     }
 

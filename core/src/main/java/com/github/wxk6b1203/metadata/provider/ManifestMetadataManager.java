@@ -13,7 +13,7 @@ public abstract class ManifestMetadataManager {
 
     public abstract void cleaningUp(String indexName, String name);
 
-    public abstract void finishDelete(String indexName, String name);
+    public abstract void finishDelete(String indexName, long epoch, String name);
 
     public interface Key {
         String INDEX = "index";
