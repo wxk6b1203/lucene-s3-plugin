@@ -31,7 +31,7 @@ public class ManifestManager {
     private final ManifestMetadataManager metadataManager;
     private final AtomicBoolean running = new AtomicBoolean(true);
 
-    private final BlockingQueue<DeleteTask> deleteQueue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<IndexFileMetadata> deleteQueue = new LinkedBlockingQueue<>();
     private final ExecutorService deleteWorkerPool;
 
     public ManifestManager(ManifestOptions options, S3Client s3Client, ManifestMetadataManager metadataManager) {
@@ -58,10 +58,10 @@ public class ManifestManager {
     }
 
     private void deleteLoop(int maxBatchSize) {
-        ArrayList<DeleteTask> batch = new ArrayList<>(maxBatchSize);
+        ArrayList<IndexFileMetadata> batch = new ArrayList<>(maxBatchSize);
         while (running.get() || !deleteQueue.isEmpty()) {
             try {
-                DeleteTask first = deleteQueue.poll(500, TimeUnit.MILLISECONDS);
+                IndexFileMetadata first = deleteQueue.poll(500, TimeUnit.MILLISECONDS);
                 if (first == null) {
                     continue;
                 }
@@ -77,7 +77,7 @@ public class ManifestManager {
                     if (remaining <= 0) {
                         break;
                     }
-                    DeleteTask next = deleteQueue.poll(remaining, TimeUnit.NANOSECONDS);
+                    IndexFileMetadata next = deleteQueue.poll(remaining, TimeUnit.NANOSECONDS);
                     if (next == null) {
                         break;
                     }
@@ -96,27 +96,37 @@ public class ManifestManager {
         }
     }
 
-    private void doDeleteBatch(List<DeleteTask> tasks) {
+    private void doDeleteBatch(List<IndexFileMetadata> tasks) {
         if (tasks.isEmpty()) {
             return;
         }
 
         List<ObjectIdentifier> objects = new ArrayList<>(tasks.size());
 
-        for (DeleteTask task : tasks) {
+        for (IndexFileMetadata task : tasks) {
             objects.add(ObjectIdentifier.builder()
-                    .key(PathUtil.s3ObjectKey(task.indexName(), task.name()))
+                    .key(PathUtil.s3ObjectKey(task.getIndexName(), task.getName()))
                     .build());
         }
+
+        tasks.forEach(e -> e.getLock().writeLock().lock());
 
         DeleteObjectsRequest deleteObjectsRequest = DeleteObjectsRequest.builder()
                 .bucket(bucket)
                 .delete(d -> d.objects(objects))
                 .build();
-        s3Client.deleteObjects(deleteObjectsRequest);
 
-        for (DeleteTask task : tasks) {
-            metadataManager.finishDelete(task.indexName(), task.epoch() , task.name());
+        try {
+            s3Client.deleteObjects(deleteObjectsRequest);
+        } finally {
+            for (IndexFileMetadata task : tasks) {
+                task.transitionTo(IndexFileStatus.DELETED);
+            }
+            tasks.forEach(e -> e.getLock().writeLock().unlock());
+        }
+
+        for (IndexFileMetadata task : tasks) {
+            metadataManager.finishDelete(task.getIndexName(), task.getEpoch() , task.getName());
         }
     }
 
@@ -125,23 +135,34 @@ public class ManifestManager {
     }
 
     // 入队删除任务（非阻塞）
-    private void enqueueDelete(String indexName, long epoch, String name) {
+    private void enqueueDelete(IndexFileMetadata indexFileMetadata) {
         if (!running.get()) {
             throw new IllegalStateException("ManifestManager is closed");
         }
-        deleteQueue.offer(new DeleteTask(indexName, epoch, name));
+        deleteQueue.offer(indexFileMetadata);
     }
 
     public void deleteFile(String indexName, String name) throws IOException {
-        IndexFileMetadata metadata = metadataManager.prepareDelete(indexName, name);
         Path path = PathUtil.walDataPath(basePath, indexName);
         try {
             Files.delete(path.resolve(name));
         } catch (NoSuchFileException ignored) {
         }
 
-        metadataManager.cleaningUp(indexName, name);
-        enqueueDelete(indexName, metadata.epoch(), name);
+        IndexFileMetadata metadata = metadataManager.fileMetadata(indexName, name);
+        if (metadata == null) {
+            // not file has been committed to remote storage, nothing to do
+            return;
+        }
+
+        try {
+            metadata.getLock().readLock().lock();
+
+            metadataManager.cleaningUp(indexName, name);
+            enqueueDelete(metadata);
+        } finally {
+            metadata.getLock().readLock().unlock();
+        }
         // TODO: 1. mark as deleted in metadataManager
         //       2. delete from local storage
         //       3. delete from remote storage

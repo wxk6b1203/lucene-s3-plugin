@@ -48,7 +48,7 @@ public class S3CachingDirectory extends BaseDirectory {
         try {
             return manifestManager.listAll(List.of(IndexFileStatus.CLEAN, IndexFileStatus.DIRTY))
                     .stream()
-                    .map(IndexFileMetadata::name)
+                    .map(IndexFileMetadata::getName)
                     .toArray(String[]::new);
         } catch (Exception e) {
             throw new IOException("Failed to list objects from S3", e);
@@ -65,7 +65,7 @@ public class S3CachingDirectory extends BaseDirectory {
     public long fileLength(String name) throws IOException {
         ensureOpen();
         IndexFileMetadata metadata = manifestManager.fileMetadata(indexName, name);
-        return metadata.size();
+        return metadata.getSize();
     }
 
     @Override

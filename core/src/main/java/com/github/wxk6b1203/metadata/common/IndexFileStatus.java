@@ -16,8 +16,9 @@ public enum IndexFileStatus {
     PINNED(3),
     // DELETING: the file is being deleted from local and remote storage
     DELETING(4),
-    // CLEANING: the file is being cleaned up from local storage
-    CLEANING(5)
+    // CLEANING: the file is being cleaned up from remote storage
+    CLEANING(5),
+    DELETED(6)
     ;
 
     @JsonValue
@@ -41,6 +42,7 @@ public enum IndexFileStatus {
             case CLEAN -> to == PINNED || to == DELETING || to == CLEANING;
             case PINNED -> to == DELETING;
             case DELETING -> to == CLEANING;
+            case CLEANING ->  to == DELETED;
             default -> false;
         };
     }

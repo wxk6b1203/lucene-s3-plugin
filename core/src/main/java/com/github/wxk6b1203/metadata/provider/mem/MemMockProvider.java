@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 @Slf4j
 public class MemMockProvider extends ManifestMetadataManager {
@@ -25,11 +26,11 @@ public class MemMockProvider extends ManifestMetadataManager {
         if (metadata != null && !metadata.isEmpty()) {
             IndexFileMetadata last = metadata.getLast();
             IndexFileMetadata deleteMetadata = new IndexFileMetadata(
-                    last.indexName(),
-                    last.name(),
-                    last.epoch() + 1,
-                    last.size(),
-                    last.checksum(),
+                    last.getLock(),
+                    last.getIndexName(),
+                    last.getName() + 1,
+                    last.getEpoch(),
+                    last.getChecksum(),
                     System.currentTimeMillis(),
                     IndexFileStatus.DELETING
             );
@@ -45,8 +46,8 @@ public class MemMockProvider extends ManifestMetadataManager {
         List<IndexFileMetadata> metadata = files.get(key);
         if (metadata != null && !metadata.isEmpty()) {
             IndexFileMetadata last = metadata.getLast();
-            if (!IndexFileStatus.validTransition(last.status(), IndexFileStatus.CLEANING)) {
-                log.error("Invalid status transition from {} to {}", last.status(), IndexFileStatus.CLEANING);
+            if (!IndexFileStatus.validTransition(last.getStatus(), IndexFileStatus.CLEANING)) {
+                log.error("Invalid status transition from {} to {}", last.getStatus(), IndexFileStatus.CLEANING);
                 return;
             }
         }
@@ -91,6 +92,7 @@ public class MemMockProvider extends ManifestMetadataManager {
         }
         List<IndexFileMetadata> metadata = files.get(key);
         metadata.add(new IndexFileMetadata(
+                new ReentrantReadWriteLock(),
                 file.indexName(),
                 file.name(),
                 metadata.size() + 1,
@@ -121,7 +123,7 @@ public class MemMockProvider extends ManifestMetadataManager {
     public synchronized List<IndexFileMetadata> listAllClean() {
         return files.values().stream()
                 .flatMap(List::stream)
-                .filter(e -> e.status() == IndexFileStatus.CLEAN || e.status() == IndexFileStatus.DIRTY)
+                .filter(e -> e.getStatus() == IndexFileStatus.CLEAN || e.getStatus() == IndexFileStatus.DIRTY)
                 .toList();
     }
 
@@ -129,12 +131,18 @@ public class MemMockProvider extends ManifestMetadataManager {
     public List<IndexFileMetadata> listAll(List<IndexFileStatus> status) {
         return files.values().stream()
                 .flatMap(List::stream)
-                .filter(e -> status.contains(e.status()))
+                .filter(e -> status.contains(e.getStatus()))
                 .toList();
     }
 
     @Override
-    public IndexFileMetadata fileMetadata(String indexName, String name) {
-        return null;
+    public synchronized IndexFileMetadata fileMetadata(String indexName, String name) {
+        String key = keyName(indexName, name);
+        List<IndexFileMetadata> metadata = files.get(key);
+        if (metadata == null || metadata.isEmpty()) {
+            return null;
+        } else {
+            return metadata.getLast();
+        }
     }
 }
