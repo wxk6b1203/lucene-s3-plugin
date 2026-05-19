@@ -5,16 +5,10 @@ import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 
-import java.io.IOException;
 import java.util.List;
+import java.util.Objects;
 
 public abstract class ManifestMetadataManager {
-    public abstract IndexFileMetadata prepareDelete(String indexName, String name) throws IOException;
-
-    public abstract void cleaningUp(String indexName, String name);
-
-    public abstract void finishDelete(String indexName, long epoch, String name);
-
     public interface Key {
         String INDEX = "index";
         String TYPE = "type";
@@ -31,12 +25,17 @@ public abstract class ManifestMetadataManager {
 
     public abstract int commitFile(IndexFile file);
 
-    public abstract IndexFileMetadata get(String indexName, String fileName);
-
-    public abstract List<IndexFileMetadata> listAllClean();
+    public abstract void updateFileStatus(String indexName, String fileName, long epoch, IndexFileStatus status);
 
     public abstract List<IndexFileMetadata> listAll(List<IndexFileStatus> status);
 
+    public List<IndexFileMetadata> listAll(String indexName, List<IndexFileStatus> status) {
+        return listAll(status).stream()
+                .filter(file -> Objects.equals(indexName, file.getIndexName()))
+                .toList();
+    }
+
     public abstract IndexFileMetadata fileMetadata(String indexName, String name);
 
+    public abstract void deleteAll(String indexName);
 }

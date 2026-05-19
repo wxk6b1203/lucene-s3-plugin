@@ -1,0 +1,497 @@
+package com.github.wxk6b1203.http;
+
+import com.github.wxk6b1203.cluster.FieldMapping;
+import com.github.wxk6b1203.cluster.NodeRole;
+import com.github.wxk6b1203.config.ServerOptions;
+import com.github.wxk6b1203.search.SearchRequest;
+import com.github.wxk6b1203.search.VectorQuery;
+import com.github.wxk6b1203.util.JsonUtil;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.URL;
+import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+class HttpApiServerTest {
+    @TempDir
+    Path tempDir;
+
+    private HttpApiServer server;
+    private int port;
+
+    @AfterEach
+    void closeServer() {
+        if (server != null) {
+            server.close();
+        }
+        try {
+            deleteChildrenWithRetry(tempDir);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void httpSearchSupportsKnnFilterPaginationPitAndInternalRequest() throws Exception {
+        startServer();
+        createBooksIndex();
+        indexBook("doc-1", "hidden", 100, List.of(1.0, 0.0));
+        indexBook("doc-2", "visible", 200, List.of(0.0, 1.0));
+
+        Map<String, Object> knn = post("/books/_search", Map.of(
+                "knn", Map.of(
+                        "field", "embedding",
+                        "query_vector", List.of(1.0, 0.0),
+                        "k", 1,
+                        "num_candidates", 10,
+                        "filter", Map.of("term", Map.of("category", "visible"))
+                )
+        ), 200);
+        assertEquals(List.of("doc-2"), hitIds(knn));
+
+        Map<String, Object> firstPage = post("/books/_search", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "sort", List.of(
+                        Map.of("pages", Map.of("order", "asc")),
+                        Map.of("_id", Map.of("order", "asc"))
+                ),
+                "size", 1
+        ), 200);
+        assertEquals(List.of("doc-1"), hitIds(firstPage));
+
+        Map<String, Object> secondPage = post("/books/_search", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "sort", List.of(
+                        Map.of("pages", Map.of("order", "asc")),
+                        Map.of("_id", Map.of("order", "asc"))
+                ),
+                "search_after", sortValues(firstPage),
+                "size", 1
+        ), 200);
+        assertEquals(List.of("doc-2"), hitIds(secondPage));
+
+        String pitId = stringValue(post("/books/_pit?keep_alive=1m", Map.of(), 200).get("id"));
+        indexBook("doc-3", "visible", 150, List.of(1.0, 0.0));
+
+        Map<String, Object> pitSearch = post("/books/_search", Map.of(
+                "pit", Map.of("id", pitId),
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200);
+        assertFalse(hitIds(pitSearch).contains("doc-3"));
+
+        Map<String, Object> currentSearch = post("/books/_search", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200);
+        assertTrue(hitIds(currentSearch).contains("doc-3"));
+        assertTrue((Boolean) delete("/_pit", Map.of("id", pitId), 200).get("succeeded"));
+
+        SearchRequest internalRequest = new SearchRequest(
+                "books",
+                Map.of("term", Map.of("category", "visible")),
+                List.of(),
+                new VectorQuery("embedding", List.of(1.0f, 0.0f), 2, 10),
+                null,
+                0,
+                2,
+                List.of(),
+                List.of(),
+                null,
+                bookMappings()
+        );
+        Map<String, Object> internalSearch = post("/_internal/books/0/_search", internalRequest, 200);
+        assertEquals("doc-3", hitIds(internalSearch).getFirst());
+    }
+
+    @Test
+    @Timeout(60)
+    @SuppressWarnings("unchecked")
+    void lifecyclePolicyStoresParsedPhaseMinAgesAndCanBeAttached() throws Exception {
+        startServer();
+        createBooksIndex();
+
+        put("/_ilm/policy/books-retention", Map.of(
+                "policy", Map.of(
+                        "phases", Map.of(
+                                "hot", Map.of("min_age", "0ms"),
+                                "warm", Map.of("min_age", "1h"),
+                                "delete", Map.of("min_age", "7d")
+                        )
+                )
+        ), 200);
+        put("/books/_ilm/policy/books-retention", Map.of(), 200);
+
+        Map<String, Object> state = get("/_cluster/state", 200);
+        Map<String, Object> policies = (Map<String, Object>) state.get("lifecyclePolicies");
+        Map<String, Object> policy = (Map<String, Object>) policies.get("books-retention");
+        Map<String, Object> minAges = (Map<String, Object>) policy.get("minAgeMillisByPhase");
+        Map<String, Object> indices = (Map<String, Object>) state.get("indices");
+        Map<String, Object> books = (Map<String, Object>) indices.get("books");
+
+        assertEquals(0, ((Number) minAges.get("HOT")).longValue());
+        assertEquals(Duration.ofHours(1).toMillis(), ((Number) minAges.get("WARM")).longValue());
+        assertEquals(Duration.ofDays(7).toMillis(), ((Number) minAges.get("DELETE")).longValue());
+        assertEquals("books-retention", books.get("lifecyclePolicy"));
+    }
+
+    @Test
+    @Timeout(60)
+    @SuppressWarnings("unchecked")
+    void lifecycleDeletePhaseRemovesExpiredIndex() throws Exception {
+        startServer();
+        createBooksIndex();
+
+        put("/_ilm/policy/delete-now", Map.of(
+                "policy", Map.of(
+                        "phases", Map.of(
+                                "delete", Map.of("min_age", "0ms")
+                        )
+                )
+        ), 200);
+        put("/books/_ilm/policy/delete-now", Map.of(), 200);
+
+        waitUntil(() -> {
+            Map<String, Object> state = get("/_cluster/state", 200);
+            Map<String, Object> indices = (Map<String, Object>) state.get("indices");
+            return !indices.containsKey("books");
+        });
+    }
+
+    @Test
+    @Timeout(60)
+    void expiredPointInTimeIsClosedByMaintenanceTask() throws Exception {
+        startServer();
+        createBooksIndex();
+
+        String pitId = stringValue(post("/books/_pit?keep_alive=10ms", Map.of(), 200).get("id"));
+
+        TimeUnit.MILLISECONDS.sleep(2_500);
+        assertEquals(404, status("DELETE", "/_pit", Map.of("id", pitId)));
+    }
+
+    @Test
+    @Timeout(60)
+    void strongPointInTimeUsesRemoteSnapshotReader() throws Exception {
+        startServer();
+        createBooksIndex();
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+        waitUntil(() -> hitIds(post("/books/_search?read_preference=strong", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200)).contains("doc-1"));
+
+        String pitId = stringValue(post("/books/_pit?keep_alive=1m&read_preference=strong", Map.of(), 200).get("id"));
+        indexBook("doc-2", "visible", 200, List.of(0.0, 1.0));
+
+        Map<String, Object> pitSearch = post("/books/_search?read_preference=strong", Map.of(
+                "pit", Map.of("id", pitId),
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200);
+
+        assertEquals(List.of("doc-1"), hitIds(pitSearch));
+        assertTrue((Boolean) delete("/_pit", Map.of("id", pitId), 200).get("succeeded"));
+    }
+
+    @Test
+    @Timeout(60)
+    @SuppressWarnings("unchecked")
+    void createIndexDoesNotExposeShardCopySettings() throws Exception {
+        startServer();
+
+        put("/books", Map.of("number_of_shards", 1), 200);
+        assertEquals(400, status("PUT", "/bad-books", Map.of(
+                "number_of_shards", 1,
+                "number_of_replicas", 1
+        )));
+
+        Map<String, Object> state = get("/_cluster/state", 200);
+        Map<String, Object> indices = (Map<String, Object>) state.get("indices");
+        Map<String, Object> books = (Map<String, Object>) indices.get("books");
+        assertFalse(books.containsKey("numberOfReplicas"));
+    }
+
+    @Test
+    @Timeout(60)
+    void deleteIndexClearsLocalAndRemoteShardDataBeforeSameNameRecreate() throws Exception {
+        startServer();
+        createBooksIndex();
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+
+        delete("/books", Map.of(), 200);
+        createBooksIndex();
+
+        Map<String, Object> response = post("/books/_search", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200);
+        assertTrue(hitIds(response).isEmpty());
+    }
+
+    @Test
+    @Timeout(60)
+    void byQueryWritesCarryShardFenceAndInternalWritesRequireIt() throws Exception {
+        startServer();
+        createBooksIndex();
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+
+        Map<String, Object> update = post("/books/_update_by_query", Map.of(
+                "query", Map.of("term", Map.of("category", "visible")),
+                "doc", Map.of("pages", 101)
+        ), 200);
+        assertEquals("updated=1", update.get("status"));
+
+        assertEquals(400, status("POST", "/_internal/books/0/_update_by_query", Map.of(
+                "query", Map.of("term", Map.of("category", "visible")),
+                "doc", Map.of("pages", 102)
+        )));
+
+        Map<String, Object> route = get("/books/_write_route?routing=doc-1", 200);
+        Map<String, Object> delete = post("/_internal/books/0/_delete_by_query", Map.of(
+                "query", Map.of("term", Map.of("category", "visible")),
+                "owner_term", route.get("ownerTerm"),
+                "allocation_epoch", route.get("allocationEpoch")
+        ), 200);
+        assertEquals("deleted=1", delete.get("status"));
+    }
+
+    private void startServer() throws Exception {
+        port = freePort();
+        server = new HttpApiServer(new ServerOptions(
+                port,
+                "test-cluster",
+                "node-1",
+                "node-1",
+                "127.0.0.1",
+                Set.of(NodeRole.MASTER, NodeRole.DATA, NodeRole.COORDINATING),
+                null,
+                "test/ns",
+                tempDir.toString(),
+                null,
+                null,
+                null,
+                null,
+                null
+        ));
+        server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+    }
+
+    private int freePort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
+        }
+    }
+
+    private void createBooksIndex() throws Exception {
+        put("/books", Map.of(
+                "number_of_shards", 1,
+                "mappings", Map.of("properties", Map.of(
+                        "category", Map.of("type", "keyword"),
+                        "pages", Map.of("type", "long"),
+                        "embedding", Map.of(
+                                "type", "dense_vector",
+                                "dimension", 2,
+                                "similarity", "cosine"
+                        )
+                ))
+        ), 200);
+    }
+
+    private void indexBook(String id, String category, int pages, List<Double> embedding) throws Exception {
+        post("/books/_doc/" + id, Map.of(
+                "category", category,
+                "pages", pages,
+                "embedding", embedding
+        ), 201);
+    }
+
+    private Map<String, FieldMapping> bookMappings() {
+        return Map.of(
+                "category", new FieldMapping("keyword", null, null, true, true, true),
+                "pages", new FieldMapping("long", null, null, true, true, true),
+                "embedding", new FieldMapping("dense_vector", 2, "cosine", true, true, false)
+        );
+    }
+
+    private Map<String, Object> put(String path, Object body, int expectedStatus) throws Exception {
+        return request("PUT", path, body, expectedStatus);
+    }
+
+    private Map<String, Object> post(String path, Object body, int expectedStatus) throws Exception {
+        return request("POST", path, body, expectedStatus);
+    }
+
+    private Map<String, Object> delete(String path, Object body, int expectedStatus) throws Exception {
+        return request("DELETE", path, body, expectedStatus);
+    }
+
+    private Map<String, Object> get(String path, int expectedStatus) throws Exception {
+        return request("GET", path, null, expectedStatus);
+    }
+
+    private Map<String, Object> request(String method, String path, Object body, int expectedStatus) throws Exception {
+        Response response = response(method, path, body);
+        if (response.status() != expectedStatus) {
+            fail(method + " " + path + " returned " + response.status() + ": " + response.body());
+        }
+        return response.body() == null || response.body().isBlank()
+                ? Map.of()
+                : JsonUtil.readValueAsMap(response.body());
+    }
+
+    private int status(String method, String path, Object body) throws Exception {
+        return response(method, path, body).status();
+    }
+
+    private Response response(String method, String path, Object body) throws Exception {
+        URL url = URI.create("http://127.0.0.1:" + port + path).toURL();
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod(method);
+        connection.setConnectTimeout((int) Duration.ofSeconds(5).toMillis());
+        connection.setReadTimeout((int) Duration.ofSeconds(10).toMillis());
+        connection.setRequestProperty("content-type", "application/json");
+        connection.setDoInput(true);
+        if (body != null) {
+            connection.setDoOutput(true);
+            try (OutputStream outputStream = connection.getOutputStream()) {
+                outputStream.write(JsonUtil.writeValueAsBytes(body));
+            }
+        }
+        int status = connection.getResponseCode();
+        String responseBody;
+        try (InputStream inputStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream()) {
+            responseBody = inputStream == null
+                    ? ""
+                    : new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+        } finally {
+            connection.disconnect();
+        }
+        return new Response(status, responseBody);
+    }
+
+    private void waitUntil(CheckedCondition condition) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        AssertionError lastFailure = null;
+        while (System.nanoTime() < deadline) {
+            try {
+                if (condition.evaluate()) {
+                    return;
+                }
+            } catch (AssertionError e) {
+                lastFailure = e;
+            }
+            TimeUnit.MILLISECONDS.sleep(100);
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+        fail("condition was not met before timeout");
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> hitIds(Map<String, Object> response) {
+        return ((List<Map<String, Object>>) response.get("hits")).stream()
+                .map(hit -> stringValue(hit.get("id")))
+                .toList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Object> sortValues(Map<String, Object> response) {
+        List<Map<String, Object>> hits = (List<Map<String, Object>>) response.get("hits");
+        return (List<Object>) hits.getFirst().get("sortValues");
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : value.toString();
+    }
+
+    private void deleteChildrenWithRetry(Path root) throws Exception {
+        IOException failure = null;
+        for (int attempt = 0; attempt < 20; attempt++) {
+            try {
+                deleteChildren(root);
+                return;
+            } catch (IOException e) {
+                failure = e;
+                TimeUnit.MILLISECONDS.sleep(50L * (attempt + 1));
+            }
+        }
+        throw failure;
+    }
+
+    private void deleteChildren(Path root) throws IOException {
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        IOException failure = null;
+        try (var children = Files.list(root)) {
+            for (Path child : children.toList()) {
+                try {
+                    deleteRecursively(child);
+                } catch (IOException e) {
+                    failure = addFailure(failure, e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private void deleteRecursively(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            return;
+        }
+        IOException failure = null;
+        try (var stream = Files.walk(path)) {
+            for (Path item : stream.sorted(Comparator.reverseOrder()).toList()) {
+                try {
+                    Files.deleteIfExists(item);
+                } catch (IOException e) {
+                    failure = addFailure(failure, e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private IOException addFailure(IOException failure, IOException e) {
+        if (failure == null) {
+            return e;
+        }
+        failure.addSuppressed(e);
+        return failure;
+    }
+
+    private interface CheckedCondition {
+        boolean evaluate() throws Exception;
+    }
+
+    private record Response(int status, String body) {
+    }
+}

@@ -13,12 +13,7 @@ public enum IndexFileStatus {
     // CLEAN: the file has been uploaded to remote storage and has same content as local storage
     CLEAN(2),
     // PINNED: the file is pinned in local storage and will not be deleted
-    PINNED(3),
-    // DELETING: the file is being deleted from local and remote storage
-    DELETING(4),
-    // CLEANING: the file is being cleaned up from remote storage
-    CLEANING(5),
-    DELETED(6)
+    PINNED(3)
     ;
 
     @JsonValue
@@ -35,15 +30,14 @@ public enum IndexFileStatus {
     }
 
     public static boolean validTransition(IndexFileStatus from, IndexFileStatus to) {
+        if (from == to) {
+            return true;
+        }
         return switch (from) {
-            // TODO: fix and add more transitions if needed
-            case DIRTY -> to == UPLOADING || to == DELETING;
-            case UPLOADING -> to == CLEAN || to == DELETING;
-            case CLEAN -> to == PINNED || to == DELETING || to == CLEANING;
-            case PINNED -> to == DELETING;
-            case DELETING -> to == CLEANING;
-            case CLEANING ->  to == DELETED;
-            default -> false;
+            case DIRTY -> to == UPLOADING;
+            case UPLOADING -> to == CLEAN;
+            case CLEAN -> to == PINNED;
+            case PINNED -> false;
         };
     }
 }

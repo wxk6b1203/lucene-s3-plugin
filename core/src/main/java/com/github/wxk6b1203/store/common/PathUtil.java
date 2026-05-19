@@ -34,6 +34,13 @@ public class PathUtil {
                 ;
     }
 
+    public static Path sharedTempPath(Path basePath, String indexName) {
+        return basePath.resolve(Hierarchy.SHARED.path)
+                .resolve(indexName)
+                .resolve(Hierarchy.TEMP.path)
+                ;
+    }
+
     public static String s3ObjectKey(String indexName, String name) {
         return indexName + Common.SLASH + Hierarchy.DATA.path + Common.SLASH + name;
     }

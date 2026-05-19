@@ -1,5 +1,6 @@
 plugins {
     id 'java'
+    id 'application'
 }
 
 group = 'com.github.wxk6b1203'
@@ -21,11 +22,22 @@ dependencies {
     testAnnotationProcessor deps.lombok
 
     implementation deps.picocli
+    implementation project(':core')
+    implementation project(':utility')
+    implementation platform(deps.awssdk.bom)
+    implementation deps.awssdk.s3
+    implementation deps.vertx.core
+    implementation deps.vertx.web
+    implementation deps.vertx.web.client
+    implementation deps.jetcd.core
     implementation deps.slf4j.api
-    implementation deps.logback.classic
-    implementation deps.logback.core
+    runtimeOnly deps.logback.classic
 }
 
 test {
     useJUnitPlatform()
+}
+
+application {
+    mainClass = 'com.github.wxk6b1203.LuceneS3'
 }

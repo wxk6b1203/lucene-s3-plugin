@@ -7,56 +7,14 @@ import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.FileNotFoundException;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 @Slf4j
 public class MemMockProvider extends ManifestMetadataManager {
     ConcurrentHashMap<String, IndexMetadata> indexes = new ConcurrentHashMap<>();
     ConcurrentHashMap<String, List<IndexFileMetadata>> files = new ConcurrentHashMap<>();
-
-    @Override
-    public synchronized IndexFileMetadata prepareDelete(String indexName, String name) throws IOException {
-        String key = keyName(indexName, name);
-        List<IndexFileMetadata> metadata = files.get(key);
-        if (metadata != null && !metadata.isEmpty()) {
-            IndexFileMetadata last = metadata.getLast();
-            IndexFileMetadata deleteMetadata = new IndexFileMetadata(
-                    last.getLock(),
-                    last.getIndexName(),
-                    last.getName() + 1,
-                    last.getEpoch(),
-                    last.getChecksum(),
-                    System.currentTimeMillis(),
-                    IndexFileStatus.DELETING
-            );
-            metadata.add(deleteMetadata);
-            return deleteMetadata;
-        }
-        throw new FileNotFoundException("File not found: " + name);
-    }
-
-    @Override
-    public synchronized void cleaningUp(String indexName, String name) {
-        String key = keyName(indexName, name);
-        List<IndexFileMetadata> metadata = files.get(key);
-        if (metadata != null && !metadata.isEmpty()) {
-            IndexFileMetadata last = metadata.getLast();
-            if (!IndexFileStatus.validTransition(last.getStatus(), IndexFileStatus.CLEANING)) {
-                log.error("Invalid status transition from {} to {}", last.getStatus(), IndexFileStatus.CLEANING);
-                return;
-            }
-        }
-    }
-
-    @Override
-    public void finishDelete(String indexName, long epoch, String name) {
-
-    }
 
     @Override
     public IndexMetadata get(String indexName) {
@@ -92,45 +50,37 @@ public class MemMockProvider extends ManifestMetadataManager {
         }
         List<IndexFileMetadata> metadata = files.get(key);
         metadata.add(new IndexFileMetadata(
-                new ReentrantReadWriteLock(),
                 file.indexName(),
                 file.name(),
+                file.dataDirectory(),
+                file.objectKey(),
                 metadata.size() + 1,
                 file.size(),
                 file.checksum(),
-                System.currentTimeMillis(),
-                IndexFileStatus.CLEAN
+                file.modifiedTime(),
+                IndexFileStatus.DIRTY
         ));
         return metadata.size();
     }
 
     @Override
-    public IndexFileMetadata get(String indexName, String fileName) {
-        String key = keyName(indexName, fileName);
-        List<IndexFileMetadata> metadata = files.get(key);
-        if (metadata == null || metadata.isEmpty()) {
-            return null;
-        } else {
-            return metadata.getLast();
+    public synchronized void updateFileStatus(String indexName, String fileName, long epoch, IndexFileStatus status) {
+        IndexFileMetadata metadata = fileMetadata(indexName, fileName);
+        if (metadata == null || metadata.getEpoch() != epoch) {
+            return;
         }
-    }
-
-    public synchronized void startRemoveFile(IndexFile file) {
-
-    }
-
-    @Override
-    public synchronized List<IndexFileMetadata> listAllClean() {
-        return files.values().stream()
-                .flatMap(List::stream)
-                .filter(e -> e.getStatus() == IndexFileStatus.CLEAN || e.getStatus() == IndexFileStatus.DIRTY)
-                .toList();
+        if (!IndexFileStatus.validTransition(metadata.getStatus(), status)) {
+            log.error("Invalid status transition from {} to {}", metadata.getStatus(), status);
+            return;
+        }
+        metadata.setStatus(status);
     }
 
     @Override
     public List<IndexFileMetadata> listAll(List<IndexFileStatus> status) {
         return files.values().stream()
-                .flatMap(List::stream)
+                .filter(metadata -> !metadata.isEmpty())
+                .map(List::getLast)
                 .filter(e -> status.contains(e.getStatus()))
                 .toList();
     }
@@ -144,5 +94,11 @@ public class MemMockProvider extends ManifestMetadataManager {
         } else {
             return metadata.getLast();
         }
+    }
+
+    @Override
+    public synchronized void deleteAll(String indexName) {
+        String prefix = indexName + "/";
+        files.keySet().removeIf(key -> key.startsWith(prefix));
     }
 }

@@ -3,16 +3,18 @@ package com.github.wxk6b1203.metadata.provider;
 import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.etcd.EtcdManifestMetadataManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class MetadataTest {
     @Test
+    @EnabledIfEnvironmentVariable(named = "ETCD_TEST_ENDPOINTS", matches = ".+")
     public void test() {
         EtcdManifestMetadataManager.Options opt =
                 EtcdManifestMetadataManager.Options.builder()
                         .namespace("test-metadata/")
-                        .endpoints("http://10.0.10.42:2379")
+                        .endpoints(System.getenv("ETCD_TEST_ENDPOINTS"))
                         .build();
         EtcdManifestMetadataManager provider = new EtcdManifestMetadataManager(opt);
         var metadata = provider.get("test-index");

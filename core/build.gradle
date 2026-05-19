@@ -7,10 +7,6 @@ version = '1.0-SNAPSHOT'
 
 repositories {
     mavenCentral()
-}
-
-repositories {
-    mavenCentral()
     gradlePluginPortal()
     maven {
         url 'https://jitpack.io'
@@ -36,8 +32,7 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testImplementation deps.slf4j.api
-    testImplementation deps.logback.classic
-    testImplementation deps.logback.core
+    testRuntimeOnly deps.logback.classic
 
     compileOnly deps.lombok
     annotationProcessor deps.lombok
@@ -45,15 +40,11 @@ dependencies {
     testAnnotationProcessor deps.lombok
 
     implementation deps.lucene.core
-    implementation deps.lucene.analyzers.common
-    implementation deps.lucene.query.parser
-    implementation deps.roaringbitmap
+    implementation deps.lucene.analysis.common
     implementation platform(deps.awssdk.bom)
     implementation deps.awssdk.s3
     implementation deps.jetcd.core
     implementation deps.slf4j.api
-    implementation deps.logback.classic
-    implementation deps.logback.core
 }
 
 test {

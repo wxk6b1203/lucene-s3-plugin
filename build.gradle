@@ -6,6 +6,21 @@ plugins {
 group = 'com.github.wxk6b1203'
 version = '1.0-SNAPSHOT'
 
+subprojects {
+    plugins.withType(JavaPlugin).configureEach {
+        java {
+            toolchain {
+                languageVersion = JavaLanguageVersion.of(25)
+            }
+        }
+
+        tasks.withType(JavaCompile).configureEach {
+            options.release = 25
+            options.encoding = 'UTF-8'
+        }
+    }
+}
+
 repositories {
     mavenCentral()
     gradlePluginPortal()
