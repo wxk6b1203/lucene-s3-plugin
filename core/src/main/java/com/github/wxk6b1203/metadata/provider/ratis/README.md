@@ -1,3 +1,0 @@
-# Ratis Metadata Provider
-
-TODO
