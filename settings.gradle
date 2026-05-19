@@ -8,6 +8,5 @@ dependencyResolutionManagement {
     }
 }
 include 'core'
-include 'generator'
 include 'server'
 include 'utility'

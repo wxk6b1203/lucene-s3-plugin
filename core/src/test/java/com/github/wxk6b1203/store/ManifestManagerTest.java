@@ -38,8 +38,8 @@ public class ManifestManagerTest {
         Thread.sleep(200);
         manager.close();
 
-        assertEquals(1, metadata.listAll(List.of(IndexFileStatus.DIRTY)).size());
-        assertEquals(0, metadata.listAll(List.of(IndexFileStatus.CLEAN)).size());
+        assertEquals(1, metadata.listAll("books", List.of(IndexFileStatus.DIRTY)).size());
+        assertEquals(0, metadata.listAll("books", List.of(IndexFileStatus.CLEAN)).size());
     }
 
     @Test

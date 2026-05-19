@@ -4,23 +4,27 @@ import com.github.wxk6b1203.errors.StorageException;
 import com.github.wxk6b1203.metadata.common.IndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
-import com.github.wxk6b1203.metadata.common.IndexMetadata;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
-import com.github.wxk6b1203.processor.metadata.annotation.Provider;
 import com.github.wxk6b1203.util.JsonUtil;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
+import io.etcd.jetcd.KeyValue;
+import io.etcd.jetcd.op.Cmp;
+import io.etcd.jetcd.op.CmpTarget;
+import io.etcd.jetcd.op.Op;
+import io.etcd.jetcd.options.DeleteOption;
 import io.etcd.jetcd.options.GetOption;
+import io.etcd.jetcd.options.PutOption;
 import lombok.Builder;
 import lombok.Data;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
-@Provider(value = "etcd")
 public class EtcdManifestMetadataManager extends ManifestMetadataManager {
-    public static final String SLASH = "/";
+    private static final int MAX_CAS_RETRIES = 32;
 
     private final Client client;
     private final String namespace;
@@ -28,138 +32,96 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
     @Data
     @Builder
     public static class Options {
-        private String endpoints;
-        private String username;
-        private String password;
         @Builder.Default
-        private String namespace = "metadata/";
+        private String namespace = "lucene-s3/cluster/manifest";
     }
 
-    // TODO: support different serialization formats
-    public enum SerializationFormat {
-        JSON,
-        PROTOBUF
-    }
-
-    public EtcdManifestMetadataManager(Options opt, Client client) {
-        this.namespace = opt.namespace;
-        this.client = client;
-    }
-
-    public EtcdManifestMetadataManager(Options opt) {
-        this.namespace = opt.namespace;
-        var cb = Client.builder().endpoints(opt.endpoints);
-        if (opt.username != null && !opt.username.isEmpty()) {
-            cb.user(ByteSequence.from(opt.username, StandardCharsets.UTF_8));
-        }
-        if (opt.password != null && !opt.password.isEmpty()) {
-            cb.password(ByteSequence.from(opt.password, StandardCharsets.UTF_8));
-        }
-        this.client = cb.build();
-    }
-
-    @Override
-    public IndexMetadata get(String indexName) {
-        ByteSequence key = ByteSequence.from((root() + SLASH + Key.INDEX + SLASH + indexName)
-                .getBytes(StandardCharsets.UTF_8));
-        try {
-            var kv = client.getKVClient();
-            var getResp = kv.get(key).get();
-            if (getResp.getKvs().isEmpty()) {
-                return null;
-            }
-            var kvs = getResp.getKvs().getFirst();
-            var value = kvs.getValue().toString(StandardCharsets.UTF_8);
-            var result = IndexMetadata.json(value);
-            result.setEpoch(kvs.getModRevision());
-            return result;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    // Store the index metadata, return the mod revision if success, otherwise return -1
-    // format: etcd key: /metadata/index/{indexName}
-    @Override
-    public long store(IndexMetadata indexMetadata) {
-        ByteSequence key = ByteSequence.from((root() + SLASH + Key.INDEX + SLASH + indexMetadata.getName())
-                .getBytes(StandardCharsets.UTF_8));
-        Long epoch = indexMetadata.getEpoch();
-        try {
-            indexMetadata.setEpoch(null);
-            var kv = client.getKVClient();
-            var ret = kv.put(key, ByteSequence.from(indexMetadata.json())).get();
-            return ret.getHeader().getRevision();
-        } catch (Exception e) {
-            StorageException ex = new StorageException("Failed to store index metadata: " + e.getMessage());
-            ex.initCause(e);
-            throw ex;
-        } finally {
-            indexMetadata.setEpoch(epoch);
-        }
+    public EtcdManifestMetadataManager(Options options, Client client) {
+        this.client = Objects.requireNonNull(client, "client");
+        this.namespace = normalize(options == null ? null : options.namespace);
     }
 
     @Override
     public int commitFile(IndexFile file) {
-        IndexFileMetadata existing = fileMetadata(file.indexName(), file.name());
-        long epoch = existing == null ? 1 : existing.getEpoch() + 1;
-        IndexFileMetadata metadata = new IndexFileMetadata(
-                file.indexName(),
-                file.name(),
-                file.dataDirectory(),
-                file.objectKey(),
-                epoch,
-                file.size(),
-                file.checksum(),
-                file.modifiedTime(),
-                IndexFileStatus.DIRTY
-        );
-        putFileMetadata(metadata);
-        return Math.toIntExact(epoch);
+        ByteSequence key = fileKey(file.indexName(), file.name());
+        for (int attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+            try {
+                KeyValue currentKv = fileKv(key);
+                IndexFileMetadata current = currentKv == null ? null : decodeFileMetadata(currentKv);
+                long epoch = current == null ? 1 : current.getEpoch() + 1;
+                IndexFileMetadata metadata = new IndexFileMetadata(
+                        file.indexName(),
+                        file.name(),
+                        file.dataDirectory(),
+                        file.objectKey(),
+                        epoch,
+                        file.size(),
+                        file.checksum(),
+                        file.modifiedTime(),
+                        IndexFileStatus.DIRTY
+                );
+                if (putIfCurrent(key, currentKv, metadata)) {
+                    return Math.toIntExact(epoch);
+                }
+            } catch (Exception e) {
+                throw storageException("Failed to commit file metadata: " + file.indexName() + "/" + file.name(), e);
+            }
+        }
+        throw new StorageException("Failed to commit file metadata after CAS retries: "
+                + file.indexName() + "/" + file.name());
     }
 
     @Override
     public void updateFileStatus(String indexName, String fileName, long epoch, IndexFileStatus status) {
-        IndexFileMetadata metadata = fileMetadata(indexName, fileName);
-        if (metadata == null || metadata.getEpoch() != epoch) {
-            return;
+        ByteSequence key = fileKey(indexName, fileName);
+        for (int attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+            try {
+                KeyValue currentKv = fileKv(key);
+                if (currentKv == null) {
+                    return;
+                }
+                IndexFileMetadata metadata = decodeFileMetadata(currentKv);
+                if (metadata.getEpoch() != epoch || !IndexFileStatus.validTransition(metadata.getStatus(), status)) {
+                    return;
+                }
+                metadata.setStatus(status);
+                if (putIfCurrent(key, currentKv, metadata)) {
+                    return;
+                }
+            } catch (Exception e) {
+                throw storageException("Failed to update file metadata status: " + indexName + "/" + fileName, e);
+            }
         }
-        if (!IndexFileStatus.validTransition(metadata.getStatus(), status)) {
-            return;
-        }
-        metadata.setStatus(status);
-        putFileMetadata(metadata);
+        throw new StorageException("Failed to update file metadata status after CAS retries: "
+                + indexName + "/" + fileName);
     }
 
     @Override
-    public List<IndexFileMetadata> listAll(List<IndexFileStatus> status) {
+    public List<IndexFileMetadata> listAll(String indexName, List<IndexFileStatus> status) {
         try {
-            var kv = client.getKVClient();
-            var resp = kv.get(filePrefix(), GetOption.builder().isPrefix(true).build()).get();
+            var response = client.getKVClient()
+                    .get(filePrefix(indexName), GetOption.builder().isPrefix(true).build())
+                    .get();
             List<IndexFileMetadata> result = new ArrayList<>();
-            for (var item : resp.getKvs()) {
-                IndexFileMetadata metadata = decodeFileMetadata(item.getValue());
+            for (KeyValue item : response.getKvs()) {
+                IndexFileMetadata metadata = decodeFileMetadata(item);
                 if (status.contains(metadata.getStatus())) {
                     result.add(metadata);
                 }
             }
             return result;
         } catch (Exception e) {
-            throw storageException("Failed to list file metadata: " + e.getMessage(), e);
+            throw storageException("Failed to list file metadata: " + indexName, e);
         }
     }
 
     @Override
     public IndexFileMetadata fileMetadata(String indexName, String name) {
         try {
-            var kv = client.getKVClient();
-            var resp = kv.get(fileKey(indexName, name)).get();
-            if (resp.getKvs().isEmpty()) {
-                return null;
-            }
-            return decodeFileMetadata(resp.getKvs().getFirst().getValue());
+            KeyValue kv = fileKv(fileKey(indexName, name));
+            return kv == null ? null : decodeFileMetadata(kv);
         } catch (Exception e) {
-            throw storageException("Failed to get file metadata: " + e.getMessage(), e);
+            throw storageException("Failed to get file metadata: " + indexName + "/" + name, e);
         }
     }
 
@@ -167,93 +129,61 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
     public void deleteAll(String indexName) {
         try {
             client.getKVClient()
-                    .delete(filePrefix(indexName), io.etcd.jetcd.options.DeleteOption.builder().isPrefix(true).build())
+                    .delete(filePrefix(indexName), DeleteOption.builder().isPrefix(true).build())
                     .get();
         } catch (Exception e) {
-            throw storageException("Failed to delete file metadata: " + e.getMessage(), e);
+            throw storageException("Failed to delete file metadata: " + indexName, e);
         }
     }
 
-    private void putFileMetadata(IndexFileMetadata metadata) {
-        try {
-            client.getKVClient().put(
-                    fileKey(metadata.getIndexName(), metadata.getName()),
-                    ByteSequence.from(JsonUtil.writeValueAsBytes(FileRecord.from(metadata)))
-            ).get();
-        } catch (Exception e) {
-            throw storageException("Failed to store file metadata: " + e.getMessage(), e);
-        }
+    private KeyValue fileKv(ByteSequence key) throws Exception {
+        var response = client.getKVClient().get(key).get();
+        return response.getKvs().isEmpty() ? null : response.getKvs().getFirst();
     }
 
-    private IndexFileMetadata decodeFileMetadata(ByteSequence value) {
-        FileRecord record = JsonUtil.readValue(value.getBytes(), FileRecord.class);
-        return new IndexFileMetadata(
-                record.indexName,
-                record.name,
-                record.dataDirectory,
-                record.objectKey,
-                record.epoch,
-                record.size,
-                record.checksum,
-                record.modifiedTime,
-                record.status
-        );
+    private boolean putIfCurrent(ByteSequence key, KeyValue currentKv, IndexFileMetadata metadata) throws Exception {
+        Cmp cmp = currentKv == null
+                ? new Cmp(key, Cmp.Op.EQUAL, CmpTarget.version(0))
+                : new Cmp(key, Cmp.Op.EQUAL, CmpTarget.modRevision(currentKv.getModRevision()));
+        return client.getKVClient()
+                .txn()
+                .If(cmp)
+                .Then(Op.put(key, ByteSequence.from(JsonUtil.writeValueAsBytes(metadata)), PutOption.DEFAULT))
+                .commit()
+                .get()
+                .isSucceeded();
     }
 
-    private ByteSequence filePrefix() {
-        return ByteSequence.from((root() + SLASH + "index_file" + SLASH).getBytes(StandardCharsets.UTF_8));
+    private IndexFileMetadata decodeFileMetadata(KeyValue kv) {
+        return JsonUtil.readValue(kv.getValue().getBytes(), IndexFileMetadata.class);
     }
 
     private ByteSequence filePrefix(String indexName) {
-        return ByteSequence.from((root() + SLASH + "index_file" + SLASH + indexName + SLASH)
-                .getBytes(StandardCharsets.UTF_8));
+        return key("index_file/" + indexName + "/");
     }
 
     private ByteSequence fileKey(String indexName, String fileName) {
-        return ByteSequence.from((root() + SLASH + "index_file" + SLASH + indexName + SLASH + fileName)
-                .getBytes(StandardCharsets.UTF_8));
+        return key("index_file/" + indexName + "/" + fileName);
     }
 
-    private String root() {
-        String normalized = namespace;
-        while (normalized.startsWith(SLASH)) {
+    private ByteSequence key(String suffix) {
+        return ByteSequence.from((namespace + "/" + suffix).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String normalize(String value) {
+        String normalized = value == null || value.isBlank() ? "lucene-s3/cluster/manifest" : value;
+        while (normalized.startsWith("/")) {
             normalized = normalized.substring(1);
         }
-        while (normalized.endsWith(SLASH)) {
+        while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
         }
-        return SLASH + normalized;
+        return "/" + normalized;
     }
 
     private StorageException storageException(String message, Exception cause) {
-        StorageException ex = new StorageException(message);
-        ex.initCause(cause);
-        return ex;
-    }
-
-    public static class FileRecord {
-        public String indexName;
-        public String name;
-        public String dataDirectory;
-        public String objectKey;
-        public long epoch;
-        public long size;
-        public long checksum;
-        public long modifiedTime;
-        public IndexFileStatus status;
-
-        public static FileRecord from(IndexFileMetadata metadata) {
-            FileRecord record = new FileRecord();
-            record.indexName = metadata.getIndexName();
-            record.name = metadata.getName();
-            record.dataDirectory = metadata.getDataDirectory();
-            record.objectKey = metadata.getObjectKey();
-            record.epoch = metadata.getEpoch();
-            record.size = metadata.getSize();
-            record.checksum = metadata.getChecksum();
-            record.modifiedTime = metadata.getModifiedTime();
-            record.status = metadata.getStatus();
-            return record;
-        }
+        StorageException exception = new StorageException(message + ": " + cause.getMessage());
+        exception.initCause(cause);
+        return exception;
     }
 }

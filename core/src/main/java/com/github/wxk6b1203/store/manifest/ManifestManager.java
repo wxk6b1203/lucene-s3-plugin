@@ -42,10 +42,6 @@ public class ManifestManager implements AutoCloseable {
         this.uploadWorkerPool = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("upload-worker-", 0).factory());
     }
 
-    public List<IndexFileMetadata> listAll(List<IndexFileStatus> statuses) {
-        return metadataManager.listAll(statuses);
-    }
-
     public List<IndexFileMetadata> listAll(String indexName, List<IndexFileStatus> statuses) {
         return metadataManager.listAll(indexName, statuses);
     }

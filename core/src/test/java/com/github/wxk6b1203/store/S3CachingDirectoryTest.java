@@ -39,13 +39,13 @@ public class S3CachingDirectoryTest {
         try (S3CachingDirectory directory = newDirectory("test-index", metadata)) {
             writeFile(directory, "_0.si", new byte[]{1, 2, 3});
             directory.sync(List.of("_0.si"));
-            assertEquals(0, metadata.listAll(List.of(IndexFileStatus.DIRTY, IndexFileStatus.CLEAN)).size());
+            assertEquals(0, metadata.listAll("test-index", List.of(IndexFileStatus.DIRTY, IndexFileStatus.CLEAN)).size());
 
             writeFile(directory, "segments_1", new byte[]{4});
             directory.sync(List.of("segments_1"));
             directory.syncMetaData();
 
-            waitForUploads(metadata, 2);
+            waitForUploads(metadata, "test-index", 2);
             assertEquals(2, metadata.listAll("test-index", List.of(IndexFileStatus.CLEAN)).size());
         }
     }
@@ -167,15 +167,15 @@ public class S3CachingDirectoryTest {
         }
     }
 
-    private void waitForUploads(MemMockProvider metadata, int expectedCleanFiles) {
+    private void waitForUploads(MemMockProvider metadata, String indexName, int expectedCleanFiles) {
         long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (System.nanoTime() < deadline) {
-            if (metadata.listAll(List.of(IndexFileStatus.CLEAN)).size() == expectedCleanFiles) {
+            if (metadata.listAll(indexName, List.of(IndexFileStatus.CLEAN)).size() == expectedCleanFiles) {
                 return;
             }
             Thread.onSpinWait();
         }
-        assertEquals(expectedCleanFiles, metadata.listAll(List.of(IndexFileStatus.CLEAN)).size());
+        assertEquals(expectedCleanFiles, metadata.listAll(indexName, List.of(IndexFileStatus.CLEAN)).size());
     }
 
     private static class NoopRemoteObjectStore implements RemoteObjectStore {

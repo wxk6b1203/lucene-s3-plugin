@@ -177,7 +177,6 @@ public class HttpApiServer implements AutoCloseable {
         this.writeRouter = new WriteRouter(shardRouter);
         this.manifestMetadataManager = options.etcdEnabled()
                 ? new EtcdManifestMetadataManager(EtcdManifestMetadataManager.Options.builder()
-                .endpoints(options.etcdEndpoints())
                 .namespace(options.etcdNamespace() + "/manifest")
                 .build(), etcdClient)
                 : new MemMockProvider();

@@ -19,13 +19,12 @@ Uses Java 25 toolchains. Tests use JUnit Jupiter 5.10.
 
 ```
 lucene-s3/
-├── generator/   Annotation processor — generates MetadataProviders enum from @Provider annotations
 ├── utility/     Shared: JSON/YAML (Jackson), ScaleFirstExecutor (thread pool)
 ├── core/        Core library — cluster state, Lucene+S3 storage, metadata mgmt, search/index APIs
 └── server/      Vert.x HTTP server — Elasticsearch-compatible REST API, CLI entry point
 ```
 
-Dependency chain: `server → core → utility`, with `generator` as annotation processor on `core`.
+Dependency chain: `server → core → utility`.
 
 ## Key Architecture
 
@@ -54,10 +53,10 @@ File status lifecycle: `DIRTY → UPLOADING → CLEAN → PINNED`. Status transi
 ### Metadata Providers
 
 `ManifestMetadataManager` is the abstract class for file metadata storage. Two implementations:
-- `EtcdManifestMetadataManager` — stores metadata in etcd key-value store. Annotated with `@Provider("etcd")`.
+- `EtcdManifestMetadataManager` — stores file manifest metadata in etcd.
 - `MemMockProvider` — in-memory, used when etcd is not configured.
 
-The `generator` module's annotation processor scans for `@Provider` annotations and generates the `MetadataProviders` enum, mapping provider keys to implementation class names.
+Index settings, mappings, lifecycle policies, node membership, and shard routing live in cluster state. Manifest metadata only tracks committed Lucene files and upload status for searchable snapshot reads.
 
 ### HTTP API (Elasticsearch-compatible)
 

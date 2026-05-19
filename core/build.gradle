@@ -20,12 +20,6 @@ tasks.withType(Jar).configureEach {
 }
 
 dependencies {
-    // Use generator only for annotations/APT, not runtime
-    compileOnly project(':generator')
-    annotationProcessor project(':generator')
-    testCompileOnly project(':generator')
-    testAnnotationProcessor project(':generator')
-
     implementation project(':utility')
 
     testImplementation platform('org.junit:junit-bom:5.10.0')

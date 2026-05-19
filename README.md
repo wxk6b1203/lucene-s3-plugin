@@ -37,7 +37,6 @@ Client
 - `server`: Vert.x HTTP API、集群协调、跨节点转发、ILM/PIT 后台维护。
 - `core`: Lucene 本地 shard 服务、shard routing、cluster state、mapping、search planner、S3 caching directory、manifest 管理。
 - `utility`: 通用工具。
-- `generator`: 辅助模块。
 
 ### 元数据和集群状态
 
