@@ -1218,7 +1218,7 @@ public class HttpApiServer implements AutoCloseable {
                 return Future.failedFuture(e);
             }
         }
-        String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber() + "/_search";
+        String uri = "/_internal/" + urlPart(target.shardId().indexName()) + "/" + target.shardId().shardNumber() + "/_search";
         return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, request)
                 .map(response -> {
                     if (response.statusCode() >= 300) {
@@ -1262,7 +1262,7 @@ public class HttpApiServer implements AutoCloseable {
                 return Future.failedFuture(e);
             }
         }
-        String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber()
+        String uri = "/_internal/" + urlPart(target.shardId().indexName()) + "/" + target.shardId().shardNumber()
                 + "/_pit?keep_alive=" + keepAlive.toMillis() + "ms"
                 + "&read_preference=" + readPreference;
         return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, null)
@@ -1535,7 +1535,7 @@ public class HttpApiServer implements AutoCloseable {
                 return Future.failedFuture(e);
             }
         }
-        String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber() + "/_update_by_query";
+        String uri = "/_internal/" + urlPart(target.shardId().indexName()) + "/" + target.shardId().shardNumber() + "/_update_by_query";
         return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, byQueryBody(fencedRequest))
                 .map(response -> {
                     if (response.statusCode() >= 300) {
@@ -1558,7 +1558,7 @@ public class HttpApiServer implements AutoCloseable {
                 return Future.failedFuture(e);
             }
         }
-        String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber() + "/_delete_by_query";
+        String uri = "/_internal/" + urlPart(target.shardId().indexName()) + "/" + target.shardId().shardNumber() + "/_delete_by_query";
         return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, byQueryBody(fencedRequest))
                 .map(response -> {
                     if (response.statusCode() >= 300) {

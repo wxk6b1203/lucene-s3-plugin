@@ -514,9 +514,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             return new SortField(null, SortField.Type.SCORE, descending);
         }
         if ("_id".equals(field)) {
-            SortField sortField = new SortField("_id", SortField.Type.STRING, descending);
-            sortField.setMissingValue(SortField.STRING_LAST);
-            return sortField;
+            return new SortField("_id", SortField.Type.STRING, descending, SortField.STRING_LAST);
         }
         FieldMapping mapping = mappings.get(field);
         if (mapping == null) {
@@ -526,19 +524,18 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             throw new IllegalArgumentException("sort field requires doc_values: " + field);
         }
         if (mapping.keyword() || mapping.bool()) {
-            SortField sortField = new SortField(field, SortField.Type.STRING, descending);
-            sortField.setMissingValue(SortField.STRING_LAST);
-            return sortField;
+            return new SortField(field, SortField.Type.STRING, descending, SortField.STRING_LAST);
         }
         if (mapping.longNumber()) {
-            SortField sortField = new SortField(field, SortField.Type.LONG, descending);
-            sortField.setMissingValue(descending ? Long.MIN_VALUE : Long.MAX_VALUE);
-            return sortField;
+            return new SortField(field, SortField.Type.LONG, descending, descending ? Long.MIN_VALUE : Long.MAX_VALUE);
         }
         if (mapping.doubleNumber()) {
-            SortField sortField = new SortField(field, SortField.Type.DOUBLE, descending);
-            sortField.setMissingValue(descending ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY);
-            return sortField;
+            return new SortField(
+                    field,
+                    SortField.Type.DOUBLE,
+                    descending,
+                    descending ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY
+            );
         }
         throw new IllegalArgumentException("sort field type is not supported: " + field);
     }
@@ -1094,7 +1091,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
 
     private Query query(Map<String, Object> query, Map<String, FieldMapping> mappings) {
         if (query == null || query.isEmpty() || query.containsKey("match_all")) {
-            return new MatchAllDocsQuery();
+            return MatchAllDocsQuery.INSTANCE;
         }
         Object ids = query.get("ids");
         if (ids instanceof Map<?, ?> idsMap && idsMap.get("values") instanceof Iterable<?> values) {
@@ -1139,7 +1136,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         addBoolClauses(builder, boolMap.get("should"), BooleanClause.Occur.SHOULD, mappings);
         addBoolClauses(builder, boolMap.get("must_not"), BooleanClause.Occur.MUST_NOT, mappings);
         BooleanQuery built = builder.build();
-        return built.clauses().isEmpty() ? new MatchAllDocsQuery() : built;
+        return built.clauses().isEmpty() ? MatchAllDocsQuery.INSTANCE : built;
     }
 
     private void addBoolClauses(
@@ -1199,7 +1196,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 .filter(token -> !token.isBlank())
                 .forEach(token -> builder.add(new TermQuery(new Term(field, token)), BooleanClause.Occur.SHOULD));
         BooleanQuery built = builder.build();
-        return built.clauses().isEmpty() ? new MatchAllDocsQuery() : built;
+        return built.clauses().isEmpty() ? MatchAllDocsQuery.INSTANCE : built;
     }
 
     private Query rangeQuery(String field, Map<?, ?> bounds, Map<String, FieldMapping> mappings) {

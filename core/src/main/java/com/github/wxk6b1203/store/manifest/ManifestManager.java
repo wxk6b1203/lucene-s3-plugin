@@ -1,6 +1,6 @@
 package com.github.wxk6b1203.store.manifest;
 
-import com.github.wxk6b1203.metadata.common.CommitingIndexFile;
+import com.github.wxk6b1203.metadata.common.CommittingIndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
@@ -58,9 +58,9 @@ public class ManifestManager implements AutoCloseable {
         return fileMetadata;
     }
 
-    public void commit(Collection<CommitingIndexFile> indexFiles) throws IOException {
+    public void commit(Collection<CommittingIndexFile> indexFiles) throws IOException {
         List<PendingUpload> pendingUploads = new ArrayList<>();
-        for (CommitingIndexFile indexFile : indexFiles) {
+        for (CommittingIndexFile indexFile : indexFiles) {
             long size = Files.size(indexFile.filePath());
             long checksum = FileChecksums.crc32(indexFile.filePath());
             long modifiedTime = Files.getLastModifiedTime(indexFile.filePath()).toMillis();

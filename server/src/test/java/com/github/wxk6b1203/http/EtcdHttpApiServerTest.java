@@ -31,7 +31,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public class EtcdHttpApiServerTest {
@@ -64,7 +66,6 @@ public class EtcdHttpApiServerTest {
 
             closeServer(node2);
             waitUntil(() -> !get(node3, "/_nodes", 200).containsKey("node-2"));
-            get(node1, "/_nodes", 200);
 
             String routing = routingForShard(1, 2);
             Map<String, Object> indexed = post(node3, "/books/_doc/rerouted-doc?routing=" + routing, Map.of(
@@ -79,6 +80,87 @@ public class EtcdHttpApiServerTest {
                     "size", 10
             ), 200);
             assertEquals(List.of("rerouted-doc"), hitIds(search));
+        } finally {
+            closeServers();
+            deletePrefix(client, namespace);
+            client.close();
+        }
+    }
+
+    @Test
+    @Timeout(90)
+    @EnabledIfEnvironmentVariable(named = "ETCD_TEST_ENDPOINTS", matches = ".+")
+    @SuppressWarnings("unchecked")
+    public void coordinatingNodeExecutesRemoteShardRpcPaths() throws Exception {
+        String namespace = "test-http/" + UUID.randomUUID();
+        Client client = Client.builder().endpoints(System.getenv("ETCD_TEST_ENDPOINTS")).build();
+        try {
+            ServerHandle node1 = startServer(namespace, "node-1", Set.of(NodeRole.MASTER, NodeRole.DATA, NodeRole.COORDINATING));
+            startServer(namespace, "node-2", Set.of(NodeRole.DATA, NodeRole.COORDINATING));
+            ServerHandle node3 = startServer(namespace, "node-3", Set.of(NodeRole.COORDINATING));
+
+            waitUntil(() -> get(node3, "/_nodes", 200).keySet().containsAll(Set.of("node-1", "node-2", "node-3")));
+            waitUntil(() -> "node-1".equals(get(node1, "/_cluster/state", 200).get("masterNodeId")));
+            put(node1, "/books", Map.of(
+                    "number_of_shards", 1,
+                    "mappings", Map.of("properties", Map.of(
+                            "category", Map.of("type", "keyword"),
+                            "pages", Map.of("type", "long")
+                    ))
+            ), 200);
+            waitUntil(() -> hasShardOwner(node3, "books", 0));
+
+            int shardNumber = 0;
+            assertNotEquals("node-3", shardOwner(node3, "books", shardNumber));
+            String routing = routingForShard(shardNumber, 1);
+            String bulkBody = """
+                    {"index":{"_index":"books","_id":"bulk-doc","routing":"%s"}}
+                    {"category":"remote-bulk","pages":1}
+                    """.formatted(routing);
+            Map<String, Object> bulk = postRaw(node3, "/_bulk", bulkBody, 200);
+            assertFalse((Boolean) bulk.get("errors"));
+
+            Map<String, Object> search = post(node3, "/books/_search", Map.of(
+                    "query", Map.of("term", Map.of("category", "remote-bulk")),
+                    "routing", routing,
+                    "size", 10
+            ), 200);
+            assertEquals(List.of("bulk-doc"), hitIds(search));
+
+            String pitId = stringValue(post(node3, "/books/_pit?keep_alive=1m", Map.of(), 200).get("id"));
+            Map<String, Object> pitSearch = post(node3, "/books/_search", Map.of(
+                    "pit", Map.of("id", pitId),
+                    "query", Map.of("term", Map.of("category", "remote-bulk")),
+                    "size", 10
+            ), 200);
+            assertEquals(List.of("bulk-doc"), hitIds(pitSearch));
+            assertTrue((Boolean) delete(node3, "/_pit", Map.of("id", pitId), 200).get("succeeded"));
+
+            Map<String, Object> update = post(node3, "/books/_update_by_query", Map.of(
+                    "query", Map.of("term", Map.of("category", "remote-bulk")),
+                    "routing", routing,
+                    "doc", Map.of("pages", 11)
+            ), 200);
+            assertEquals("updated=1", update.get("status"));
+            Map<String, Object> updated = post(node3, "/books/_search", Map.of(
+                    "query", Map.of("term", Map.of("category", "remote-bulk")),
+                    "routing", routing,
+                    "size", 10
+            ), 200);
+            Map<String, Object> source = (Map<String, Object>) ((List<Map<String, Object>>) updated.get("hits")).getFirst().get("source");
+            assertEquals(11, ((Number) source.get("pages")).intValue());
+
+            Map<String, Object> delete = post(node3, "/books/_delete_by_query", Map.of(
+                    "query", Map.of("term", Map.of("category", "remote-bulk")),
+                    "routing", routing
+            ), 200);
+            assertEquals("deleted=1", delete.get("status"));
+            Map<String, Object> afterDelete = post(node3, "/books/_search", Map.of(
+                    "query", Map.of("term", Map.of("category", "remote-bulk")),
+                    "routing", routing,
+                    "size", 10
+            ), 200);
+            assertTrue(hitIds(afterDelete).isEmpty());
         } finally {
             closeServers();
             deletePrefix(client, namespace);
@@ -161,6 +243,20 @@ public class EtcdHttpApiServerTest {
         return request(server, "POST", path, body, expectedStatus);
     }
 
+    private Map<String, Object> postRaw(ServerHandle server, String path, String body, int expectedStatus) throws Exception {
+        Response response = responseRaw(server, "POST", path, body);
+        if (response.status() != expectedStatus) {
+            fail("POST " + path + " returned " + response.status() + ": " + response.body());
+        }
+        return response.body() == null || response.body().isBlank()
+                ? Map.of()
+                : JsonUtil.readValueAsMap(response.body());
+    }
+
+    private Map<String, Object> delete(ServerHandle server, String path, Object body, int expectedStatus) throws Exception {
+        return request(server, "DELETE", path, body, expectedStatus);
+    }
+
     private Map<String, Object> get(ServerHandle server, String path, int expectedStatus) throws Exception {
         return request(server, "GET", path, null, expectedStatus);
     }
@@ -188,6 +284,33 @@ public class EtcdHttpApiServerTest {
             connection.setDoOutput(true);
             try (OutputStream outputStream = connection.getOutputStream()) {
                 outputStream.write(JsonUtil.writeValueAsBytes(body));
+            }
+        }
+        int status = connection.getResponseCode();
+        String responseBody;
+        try (InputStream inputStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream()) {
+            responseBody = inputStream == null
+                    ? ""
+                    : new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+        } finally {
+            connection.disconnect();
+        }
+        return new Response(status, responseBody);
+    }
+
+    private Response responseRaw(ServerHandle server, String method, String path, String body) throws Exception {
+        URL url = URI.create("http://127.0.0.1:" + server.port() + path).toURL();
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod(method);
+        connection.setConnectTimeout((int) Duration.ofSeconds(5).toMillis());
+        connection.setReadTimeout((int) Duration.ofSeconds(20).toMillis());
+        connection.setRequestProperty("content-type", "application/x-ndjson");
+        connection.setRequestProperty("connection", "close");
+        connection.setDoInput(true);
+        if (body != null) {
+            connection.setDoOutput(true);
+            try (OutputStream outputStream = connection.getOutputStream()) {
+                outputStream.write(body.getBytes(StandardCharsets.UTF_8));
             }
         }
         int status = connection.getResponseCode();
@@ -232,6 +355,19 @@ public class EtcdHttpApiServerTest {
         return ((List<Map<String, Object>>) response.get("hits")).stream()
                 .map(hit -> String.valueOf(hit.get("id")))
                 .toList();
+    }
+
+    private boolean hasShardOwner(ServerHandle server, String indexName, int shardNumber) throws Exception {
+        try {
+            shardOwner(server, indexName, shardNumber);
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : value.toString();
     }
 
     private void deletePrefix(Client client, String namespace) throws Exception {

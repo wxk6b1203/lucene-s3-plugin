@@ -41,8 +41,8 @@ Dependency chain: `server → core → utility`.
 
 `S3CachingDirectory` extends Lucene's `BaseDirectory`:
 
-1. **Writes** go to a local NIO-based WAL directory (`/{dataPath}/wal/{indexName}/_data/`).
-2. On `syncMetaData()` (called by `IndexWriter.finishCommit()`), commited segment files are published to the `ManifestManager`.
+1. **Writes** go to a local NIO-based WAL directory (`/{dataPath}/_wal/{indexName}/_data/`).
+2. On `syncMetaData()` (called by `IndexWriter.finishCommit()`), committed segment files are published to the `ManifestManager`.
 3. `ManifestManager` marks file metadata as `DIRTY` in the metadata store, then asynchronously uploads to S3 (`UPLOADING` → `CLEAN`).
 4. **Reads** check WAL first, then local shared cache, then download from S3 on-demand.
 
@@ -77,7 +77,7 @@ Index settings, mappings, lifecycle policies, node membership, and shard routing
 
 **Request forwarding:** Cluster-state mutations are forwarded to the master; write requests are forwarded to the shard owner. Write fence headers (`x-lucene-s3-owner-term`, `x-lucene-s3-allocation-epoch`) prevent stale writes.
 
-**Search with read preferences:** `weak` (any data node), `strong` (only nodes with remote snapshot ready), `owner` (shard owner only). The coordinator merges shard-level results.
+**Search with read preferences:** public APIs accept `weak` and `strong`. `weak` can mix shard owner local reads for dirty/uploading shards with remote snapshot reads for clean shards. `strong` reads only remote clean/pinned snapshots. Internal shard APIs also accept `owner` and `remote`. The coordinator merges shard-level results.
 
 ### Field Mappings
 
@@ -85,4 +85,4 @@ Documents require explicit field mappings (`FieldMapping` record). Supported typ
 
 ## Project Status
 
-This is an experimental project (as stated in README). The working tree contains staged-then-deleted files for `DeterministicPrimaryShardElector`, `PrimaryShardElector`, `ShardRole`, `FeatureNotImplementedException`, `ByQueryService`, `CoordinatingByQueryService`, `DistributedQueryCoordinator`, `QueryCoordinator`, and `PlaceholderExecutionTest` — these classes are being refactored/removed.
+This is an experimental project (as stated in README). The current direction is stateless data nodes with etcd-backed cluster state, a single shard owner for writes, and S3/compatible object storage as the durable source for committed Lucene files. Do not reintroduce primary/replica shard semantics unless the design changes explicitly.

@@ -1,6 +1,6 @@
 package com.github.wxk6b1203.store;
 
-import com.github.wxk6b1203.metadata.common.CommitingIndexFile;
+import com.github.wxk6b1203.metadata.common.CommittingIndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.mem.MemMockProvider;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
@@ -40,7 +40,7 @@ public class ManifestManagerTest {
         Path file = tempDir.resolve("segments_1");
         Files.write(file, new byte[]{1});
 
-        manager.commit(List.of(new CommitingIndexFile("books", file)));
+        manager.commit(List.of(new CommittingIndexFile("books", file)));
         Thread.sleep(200);
         manager.close();
 
@@ -60,8 +60,8 @@ public class ManifestManagerTest {
         Files.write(segments, new byte[]{2});
 
         manager.commit(List.of(
-                new CommitingIndexFile("books", data),
-                new CommitingIndexFile("books", segments)
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
         ));
         waitUntil(() -> metadata.fileMetadata("books", "segments_1").getStatus() == IndexFileStatus.CLEAN);
         manager.close();
@@ -84,8 +84,8 @@ public class ManifestManagerTest {
         Files.write(segments, new byte[]{2});
 
         manager.commit(List.of(
-                new CommitingIndexFile("books", data),
-                new CommitingIndexFile("books", segments)
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
         ));
         waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.UPLOADING);
         manager.close();
@@ -107,15 +107,15 @@ public class ManifestManagerTest {
 
         remote.failName("_0.si");
         manager.commit(List.of(
-                new CommitingIndexFile("books", data),
-                new CommitingIndexFile("books", segments)
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
         ));
         waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.UPLOADING);
 
         remote.failName(null);
         manager.commit(List.of(
-                new CommitingIndexFile("books", data),
-                new CommitingIndexFile("books", segments)
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
         ));
         waitUntil(() -> metadata.fileMetadata("books", "segments_1").getStatus() == IndexFileStatus.CLEAN);
         manager.close();
@@ -140,14 +140,14 @@ public class ManifestManagerTest {
         Files.write(segments, new byte[]{2});
 
         manager.commit(List.of(
-                new CommitingIndexFile("books", data),
-                new CommitingIndexFile("books", segments)
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
         ));
         assertTrue(remote.awaitBlockedPut());
 
         manager.commit(List.of(
-                new CommitingIndexFile("books", data),
-                new CommitingIndexFile("books", segments)
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
         ));
         Thread.sleep(200);
 
@@ -175,13 +175,13 @@ public class ManifestManagerTest {
         Files.write(segments, new byte[]{2});
 
         manager.commit(List.of(
-                new CommitingIndexFile("books", data),
-                new CommitingIndexFile("books", segments)
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
         ));
         assertTrue(remote.awaitBlockedPut());
 
         Files.write(data, new byte[]{3});
-        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        manager.commit(List.of(new CommittingIndexFile("books", data)));
         waitUntil(() -> metadata.fileMetadata("books", "_0.si").getEpoch() == 2
                 && metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.CLEAN);
 
@@ -203,12 +203,12 @@ public class ManifestManagerTest {
         Files.write(data, new byte[]{1});
 
         remote.failName("_0.si");
-        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        manager.commit(List.of(new CommittingIndexFile("books", data)));
         waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.UPLOADING);
 
         remote.failName(null);
         Files.write(data, new byte[]{1, 2});
-        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        manager.commit(List.of(new CommittingIndexFile("books", data)));
         waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.CLEAN);
         manager.close();
 
@@ -227,14 +227,14 @@ public class ManifestManagerTest {
         FileTime modifiedTime = Files.getLastModifiedTime(data);
 
         remote.failName("_0.si");
-        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        manager.commit(List.of(new CommittingIndexFile("books", data)));
         waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.UPLOADING);
         long firstChecksum = metadata.fileMetadata("books", "_0.si").getChecksum();
 
         remote.failName(null);
         Files.write(data, new byte[]{3, 4});
         Files.setLastModifiedTime(data, modifiedTime);
-        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        manager.commit(List.of(new CommittingIndexFile("books", data)));
         waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.CLEAN);
         manager.close();
 
@@ -254,8 +254,8 @@ public class ManifestManagerTest {
         Files.write(segments, new byte[]{2});
 
         manager.commit(List.of(
-                new CommitingIndexFile("books__shard_0", data),
-                new CommitingIndexFile("books__shard_0", segments)
+                new CommittingIndexFile("books__shard_0", data),
+                new CommittingIndexFile("books__shard_0", segments)
         ));
         waitUntil(() -> metadata.fileMetadata("books__shard_0", "segments_1").getStatus() == IndexFileStatus.CLEAN);
 

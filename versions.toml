@@ -25,4 +25,3 @@ logback-core = { module = "ch.qos.logback:logback-core", version.ref = "logback"
 jackson-dataformat-yaml = { module = "tools.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
 vertx-core = { module = "io.vertx:vertx-core", version.ref = "vertx" }
 vertx-web = { module = "io.vertx:vertx-web", version.ref = "vertx" }
-vertx-web-client = { module = "io.vertx:vertx-web-client", version.ref = "vertx" }

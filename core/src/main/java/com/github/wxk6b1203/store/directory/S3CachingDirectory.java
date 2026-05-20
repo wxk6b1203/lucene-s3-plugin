@@ -1,6 +1,6 @@
 package com.github.wxk6b1203.store.directory;
 
-import com.github.wxk6b1203.metadata.common.CommitingIndexFile;
+import com.github.wxk6b1203.metadata.common.CommittingIndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.store.common.FileChecksums;
@@ -187,10 +187,10 @@ public class S3CachingDirectory extends BaseDirectory {
     }
 
     private void publishLocalFiles(Collection<String> publishCandidates) throws IOException {
-        List<CommitingIndexFile> files = new ArrayList<>();
+        List<CommittingIndexFile> files = new ArrayList<>();
         for (String name : publishCandidates) {
             if (shouldPublish(name) && shouldCommitToManifest(name) && Files.exists(walDataPath.resolve(name))) {
-                files.add(new CommitingIndexFile(indexName, walDataPath.resolve(name)));
+                files.add(new CommittingIndexFile(indexName, walDataPath.resolve(name)));
             }
         }
         if (!files.isEmpty()) {
