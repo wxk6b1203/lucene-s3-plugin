@@ -40,3 +40,38 @@ test {
 application {
     mainClass = 'com.github.wxk6b1203.LuceneS3'
 }
+
+def pathingJar = tasks.register('pathingJar', Jar) {
+    archiveBaseName = 'server'
+    archiveClassifier = 'classpath'
+    dependsOn tasks.named('jar')
+    dependsOn configurations.runtimeClasspath
+    inputs.file(tasks.named('jar').flatMap { it.archiveFile })
+    inputs.files(configurations.runtimeClasspath)
+
+    doFirst {
+        def classpathFiles = [tasks.named('jar').get().archiveFile.get().asFile]
+        classpathFiles.addAll(configurations.runtimeClasspath.files)
+        manifest {
+            attributes(
+                    'Main-Class': application.mainClass.get(),
+                    'Class-Path': classpathFiles.collect { it.name.replace(' ', '%20') }.join(' ')
+            )
+        }
+    }
+}
+
+tasks.named('startScripts') {
+    dependsOn pathingJar
+    classpath = files(pathingJar)
+}
+
+distributions {
+    main {
+        contents {
+            into('lib') {
+                from(pathingJar)
+            }
+        }
+    }
+}

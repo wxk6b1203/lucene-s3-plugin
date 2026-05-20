@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./gradlew :core:test                     # Run core module tests only
 ./gradlew :core:test --tests "com.github.wxk6b1203.store.S3CachingDirectoryTest"  # Single test
 ./gradlew :server:run                    # Start the server (default port 9200)
-./gradlew shadowJar                      # Build fat JAR with Main-Class: LuceneS3
+./gradlew :server:distZip                # Build server distribution zip
 ```
 
 Uses Java 25 toolchains. Tests use JUnit Jupiter 5.10.
