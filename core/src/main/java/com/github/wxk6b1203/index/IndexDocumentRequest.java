@@ -10,10 +10,21 @@ public record IndexDocumentRequest(
         ShardId shardId,
         String id,
         Map<String, Object> source,
-        Map<String, FieldMapping> mappings
+        Map<String, FieldMapping> mappings,
+        boolean createOnly
 ) {
     public IndexDocumentRequest(String indexName, ShardId shardId, String id, Map<String, Object> source) {
-        this(indexName, shardId, id, source, Map.of());
+        this(indexName, shardId, id, source, Map.of(), false);
+    }
+
+    public IndexDocumentRequest(
+            String indexName,
+            ShardId shardId,
+            String id,
+            Map<String, Object> source,
+            Map<String, FieldMapping> mappings
+    ) {
+        this(indexName, shardId, id, source, mappings, false);
     }
 
     public IndexDocumentRequest {

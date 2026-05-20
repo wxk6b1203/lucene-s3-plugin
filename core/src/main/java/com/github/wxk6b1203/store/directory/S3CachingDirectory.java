@@ -3,6 +3,7 @@ package com.github.wxk6b1203.store.directory;
 import com.github.wxk6b1203.metadata.common.CommitingIndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
+import com.github.wxk6b1203.store.common.FileChecksums;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import org.apache.lucene.index.IndexWriter;
@@ -16,6 +17,7 @@ import org.apache.lucene.store.NoLockFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -171,6 +173,20 @@ public class S3CachingDirectory extends BaseDirectory {
         }
         Set<String> publishCandidates = new HashSet<>(syncedFiles);
         publishCandidates.addAll(List.of(walDirectory.listAll()));
+        publishLocalFiles(publishCandidates);
+        syncedFiles.clear();
+    }
+
+    public void publishLocalCommit() throws IOException {
+        ensureOpen();
+        List<String> localFiles = List.of(walDirectory.listAll());
+        if (localFiles.stream().noneMatch(this::isCommittedSegmentFile)) {
+            return;
+        }
+        publishLocalFiles(localFiles);
+    }
+
+    private void publishLocalFiles(Collection<String> publishCandidates) throws IOException {
         List<CommitingIndexFile> files = new ArrayList<>();
         for (String name : publishCandidates) {
             if (shouldPublish(name) && shouldCommitToManifest(name) && Files.exists(walDataPath.resolve(name))) {
@@ -180,7 +196,6 @@ public class S3CachingDirectory extends BaseDirectory {
         if (!files.isEmpty()) {
             manifestManager.commit(files);
         }
-        syncedFiles.clear();
     }
 
     @Override
@@ -270,18 +285,18 @@ public class S3CachingDirectory extends BaseDirectory {
                 if (localFileAvailable(name)) {
                     return;
                 }
-                moveIntoCache(temp, sharedDataPath.resolve(name));
+                moveIntoCache(temp, sharedDataPath.resolve(name), metadata);
             } finally {
                 Files.deleteIfExists(temp);
             }
         }
     }
 
-    private void moveIntoCache(Path source, Path target) throws IOException {
+    private void moveIntoCache(Path source, Path target, IndexFileMetadata metadata) throws IOException {
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
-            if (Files.exists(target)) {
+            if (sharedCacheAvailable(metadata.getName())) {
                 return;
             }
             Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
@@ -305,14 +320,28 @@ public class S3CachingDirectory extends BaseDirectory {
     }
 
     private boolean sharedCacheAvailable(String name) throws IOException {
-        if (!Files.exists(sharedDataPath.resolve(name))) {
+        Path sharedFile = sharedDataPath.resolve(name);
+        if (!Files.exists(sharedFile)) {
             return false;
         }
-        if (includeWalFiles) {
+        IndexFileMetadata metadata;
+        try {
+            metadata = readableRemoteFileMetadata(name);
+        } catch (NoSuchFileException e) {
+            return false;
+        }
+        if (cacheMatches(sharedFile, metadata)) {
             return true;
         }
-        readableRemoteFileMetadata(name);
-        return true;
+        deleteIfExists(sharedFile);
+        return false;
+    }
+
+    private boolean cacheMatches(Path sharedFile, IndexFileMetadata metadata) throws IOException {
+        if (Files.size(sharedFile) != metadata.getSize()) {
+            return false;
+        }
+        return metadata.getChecksum() == 0 || FileChecksums.crc32(sharedFile) == metadata.getChecksum();
     }
 
     private void deleteLocalIfExists(String name) throws IOException {

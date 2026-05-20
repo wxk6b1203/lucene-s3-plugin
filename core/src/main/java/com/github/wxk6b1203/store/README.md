@@ -1,21 +1,16 @@
 # Store
 
-The index WAL and persistent storage implementation.
+This package contains the Lucene `Directory` implementation and object-store adapter layer.
 
-## Architecture
+Local files are organized by physical shard name:
 
-The file storage structure is organized as follows:
 ```text
-/{root}/
-    |-- wal/{indexName}/ # Write-Ahead Log files for each index
-                |-- _data/ # Persistent storage files for each index
-                |-- _meta/ # Metadata files for each index
-                |-- _temp/ # Temporary files
-    |-- shared/ # Shared resources across indexes
-          |-- cache/ # Cache files
-          |-- config/ # Configuration files
+<data-path>/
+  _wal/<index>__shard_<n>/_data/       # current owner local Lucene writer files
+  _shared/<index>__shard_<n>/_data/    # local cache for remote clean/pinned files
+  _shared/<index>__shard_<n>/_temp/    # temporary remote download files
 ```
 
-The metadata structure is organized as follows:
-```text
-/{root}/{node_id}/
+`S3CachingDirectory` writes to `_wal` and reads from `_wal`, then `_shared`, then the configured
+`RemoteObjectStore`. `ManifestManager` publishes committed Lucene files to the remote store and
+tracks file status in `ManifestMetadataManager`.

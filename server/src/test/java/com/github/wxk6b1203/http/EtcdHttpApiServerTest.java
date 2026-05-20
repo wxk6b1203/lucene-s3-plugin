@@ -1,0 +1,257 @@
+package com.github.wxk6b1203.http;
+
+import com.github.wxk6b1203.cluster.NodeRole;
+import com.github.wxk6b1203.config.ServerOptions;
+import com.github.wxk6b1203.util.JsonUtil;
+import io.etcd.jetcd.ByteSequence;
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.options.DeleteOption;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.fail;
+
+public class EtcdHttpApiServerTest {
+    @TempDir
+    Path tempDir;
+
+    private final List<ServerHandle> servers = new ArrayList<>();
+
+    @Test
+    @Timeout(90)
+    @EnabledIfEnvironmentVariable(named = "ETCD_TEST_ENDPOINTS", matches = ".+")
+    @SuppressWarnings("unchecked")
+    public void nonMasterWriteReroutesStaleShardOwnerThroughMaster() throws Exception {
+        String namespace = "test-http/" + UUID.randomUUID();
+        Client client = Client.builder().endpoints(System.getenv("ETCD_TEST_ENDPOINTS")).build();
+        try {
+            ServerHandle node1 = startServer(namespace, "node-1", Set.of(NodeRole.MASTER, NodeRole.DATA, NodeRole.COORDINATING));
+            ServerHandle node2 = startServer(namespace, "node-2", Set.of(NodeRole.DATA, NodeRole.COORDINATING));
+            ServerHandle node3 = startServer(namespace, "node-3", Set.of(NodeRole.DATA, NodeRole.COORDINATING));
+
+            waitUntil(() -> get(node3, "/_nodes", 200).keySet().containsAll(Set.of("node-1", "node-2", "node-3")));
+            waitUntil(() -> "node-1".equals(get(node1, "/_cluster/state", 200).get("masterNodeId")));
+            put(node1, "/books", Map.of(
+                    "number_of_shards", 2,
+                    "mappings", Map.of("properties", Map.of(
+                            "category", Map.of("type", "keyword")
+                    ))
+            ), 200);
+            waitUntil(() -> shardOwner(node1, "books", 1).equals("node-2"));
+
+            closeServer(node2);
+            waitUntil(() -> !get(node3, "/_nodes", 200).containsKey("node-2"));
+            get(node1, "/_nodes", 200);
+
+            String routing = routingForShard(1, 2);
+            Map<String, Object> indexed = post(node3, "/books/_doc/rerouted-doc?routing=" + routing, Map.of(
+                    "category", "rerouted"
+            ), 201);
+            Map<String, Object> shardId = (Map<String, Object>) indexed.get("shardId");
+            assertEquals(1, ((Number) shardId.get("shardNumber")).intValue());
+            assertNotEquals("node-2", shardOwner(node1, "books", 1));
+
+            Map<String, Object> search = post(node3, "/books/_search", Map.of(
+                    "query", Map.of("term", Map.of("category", "rerouted")),
+                    "size", 10
+            ), 200);
+            assertEquals(List.of("rerouted-doc"), hitIds(search));
+        } finally {
+            closeServers();
+            deletePrefix(client, namespace);
+            client.close();
+        }
+    }
+
+    private ServerHandle startServer(String namespace, String nodeId, Set<NodeRole> roles) throws Exception {
+        int port = freePort();
+        HttpApiServer server = new HttpApiServer(new ServerOptions(
+                port,
+                "test-cluster",
+                nodeId,
+                nodeId,
+                "127.0.0.1",
+                roles,
+                System.getenv("ETCD_TEST_ENDPOINTS"),
+                namespace,
+                tempDir.resolve(nodeId).toString(),
+                null,
+                null,
+                null,
+                null,
+                null
+        ));
+        server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+        ServerHandle handle = new ServerHandle(nodeId, port, server);
+        servers.add(handle);
+        return handle;
+    }
+
+    private void closeServer(ServerHandle handle) {
+        if (servers.remove(handle)) {
+            handle.server().close();
+        }
+    }
+
+    private void closeServers() {
+        for (ServerHandle server : List.copyOf(servers)) {
+            closeServer(server);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private String shardOwner(ServerHandle server, String indexName, int shardNumber) throws Exception {
+        Map<String, Object> state = get(server, "/_cluster/state", 200);
+        List<Map<String, Object>> routingTable = (List<Map<String, Object>>) state.get("routingTable");
+        return routingTable.stream()
+                .filter(routing -> {
+                    Map<String, Object> shardId = (Map<String, Object>) routing.get("shardId");
+                    return indexName.equals(shardId.get("indexName"))
+                            && shardNumber == ((Number) shardId.get("shardNumber")).intValue();
+                })
+                .map(routing -> String.valueOf(routing.get("nodeId")))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private String routingForShard(int shardNumber, int numberOfShards) {
+        for (int i = 0; i < 10_000; i++) {
+            String routing = "routing-" + i;
+            if (expectedShard(routing, numberOfShards) == shardNumber) {
+                return routing;
+            }
+        }
+        throw new AssertionError("failed to find routing for shard " + shardNumber);
+    }
+
+    private int expectedShard(String routing, int numberOfShards) {
+        CRC32 crc32 = new CRC32();
+        crc32.update(routing.getBytes(StandardCharsets.UTF_8));
+        return Math.toIntExact(Math.floorMod(crc32.getValue(), numberOfShards));
+    }
+
+    private Map<String, Object> put(ServerHandle server, String path, Object body, int expectedStatus) throws Exception {
+        return request(server, "PUT", path, body, expectedStatus);
+    }
+
+    private Map<String, Object> post(ServerHandle server, String path, Object body, int expectedStatus) throws Exception {
+        return request(server, "POST", path, body, expectedStatus);
+    }
+
+    private Map<String, Object> get(ServerHandle server, String path, int expectedStatus) throws Exception {
+        return request(server, "GET", path, null, expectedStatus);
+    }
+
+    private Map<String, Object> request(ServerHandle server, String method, String path, Object body, int expectedStatus) throws Exception {
+        Response response = response(server, method, path, body);
+        if (response.status() != expectedStatus) {
+            fail(method + " " + path + " returned " + response.status() + ": " + response.body());
+        }
+        return response.body() == null || response.body().isBlank()
+                ? Map.of()
+                : JsonUtil.readValueAsMap(response.body());
+    }
+
+    private Response response(ServerHandle server, String method, String path, Object body) throws Exception {
+        URL url = URI.create("http://127.0.0.1:" + server.port() + path).toURL();
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod(method);
+        connection.setConnectTimeout((int) Duration.ofSeconds(5).toMillis());
+        connection.setReadTimeout((int) Duration.ofSeconds(20).toMillis());
+        connection.setRequestProperty("content-type", "application/json");
+        connection.setRequestProperty("connection", "close");
+        connection.setDoInput(true);
+        if (body != null) {
+            connection.setDoOutput(true);
+            try (OutputStream outputStream = connection.getOutputStream()) {
+                outputStream.write(JsonUtil.writeValueAsBytes(body));
+            }
+        }
+        int status = connection.getResponseCode();
+        String responseBody;
+        try (InputStream inputStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream()) {
+            responseBody = inputStream == null
+                    ? ""
+                    : new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+        } finally {
+            connection.disconnect();
+        }
+        return new Response(status, responseBody);
+    }
+
+    private int freePort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
+        }
+    }
+
+    private void waitUntil(CheckedCondition condition) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+        AssertionError lastFailure = null;
+        while (System.nanoTime() < deadline) {
+            try {
+                if (condition.evaluate()) {
+                    return;
+                }
+            } catch (AssertionError e) {
+                lastFailure = e;
+            }
+            TimeUnit.MILLISECONDS.sleep(100);
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+        fail("condition was not met before timeout");
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> hitIds(Map<String, Object> response) {
+        return ((List<Map<String, Object>>) response.get("hits")).stream()
+                .map(hit -> String.valueOf(hit.get("id")))
+                .toList();
+    }
+
+    private void deletePrefix(Client client, String namespace) throws Exception {
+        String normalized = namespace;
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        ByteSequence prefix = ByteSequence.from(("/" + normalized).getBytes(StandardCharsets.UTF_8));
+        client.getKVClient()
+                .delete(prefix, DeleteOption.builder().isPrefix(true).build())
+                .get(5, TimeUnit.SECONDS);
+    }
+
+    private interface CheckedCondition {
+        boolean evaluate() throws Exception;
+    }
+
+    private record ServerHandle(String nodeId, int port, HttpApiServer server) {
+    }
+
+    private record Response(int status, String body) {
+    }
+}

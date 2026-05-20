@@ -9,9 +9,12 @@ import com.github.wxk6b1203.search.SearchResponse;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Collection;
 
 public interface LocalShardIndexService extends AutoCloseable {
     IndexDocumentResponse index(IndexDocumentRequest request) throws IOException;
+
+    IndexDocumentResponse delete(IndexDocumentRequest request) throws IOException;
 
     SearchResponse search(ShardId shardId, SearchRequest request) throws IOException;
 
@@ -33,6 +36,8 @@ public interface LocalShardIndexService extends AutoCloseable {
     ByQueryResponse deleteByQuery(ShardId shardId, ByQueryRequest request) throws IOException;
 
     void deleteIndex(String indexName, int numberOfShards) throws IOException;
+
+    void retryPendingUploads(Collection<ShardId> shardIds) throws IOException;
 
     @Override
     void close() throws IOException;

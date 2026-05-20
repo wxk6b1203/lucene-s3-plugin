@@ -15,5 +15,7 @@ public abstract class ManifestMetadataManager {
 
     public abstract IndexFileMetadata fileMetadata(String indexName, String name);
 
+    public abstract void deleteByStatus(String indexName, List<IndexFileStatus> statuses);
+
     public abstract void deleteAll(String indexName);
 }

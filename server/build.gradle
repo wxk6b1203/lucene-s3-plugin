@@ -28,7 +28,6 @@ dependencies {
     implementation deps.awssdk.s3
     implementation deps.vertx.core
     implementation deps.vertx.web
-    implementation deps.vertx.web.client
     implementation deps.jetcd.core
     implementation deps.slf4j.api
     runtimeOnly deps.logback.classic

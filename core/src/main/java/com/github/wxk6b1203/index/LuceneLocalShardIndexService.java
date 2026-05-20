@@ -63,6 +63,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -72,6 +73,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class LuceneLocalShardIndexService implements LocalShardIndexService {
+    private static final int UPDATE_BY_QUERY_BATCH_SIZE = 512;
+
     private final Path basePath;
     private final String bucket;
     private final ManifestMetadataManager metadataManager;
@@ -97,10 +100,38 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         ShardWriter shardWriter = writers.computeIfAbsent(request.shardId(), this::openShardWriter);
         synchronized (shardWriter) {
             Document document = document(request.indexName(), request.shardId(), id, request.source(), request.mappings());
-            shardWriter.writer.updateDocument(new Term("_id", id), document);
+            if (request.createOnly()) {
+                try (DirectoryReader reader = DirectoryReader.open(shardWriter.writer)) {
+                    if (new IndexSearcher(reader).count(new TermQuery(new Term("_id", id))) > 0) {
+                        throw new IllegalArgumentException("document already exists: " + id);
+                    }
+                }
+                shardWriter.writer.addDocument(document);
+            } else {
+                shardWriter.writer.updateDocument(new Term("_id", id), document);
+            }
             shardWriter.writer.commit();
         }
-        return new IndexDocumentResponse(request.indexName(), request.shardId(), id, "indexed", true);
+        return new IndexDocumentResponse(
+                request.indexName(),
+                request.shardId(),
+                id,
+                request.createOnly() ? "created" : "indexed",
+                true
+        );
+    }
+
+    @Override
+    public IndexDocumentResponse delete(IndexDocumentRequest request) throws IOException {
+        if (request.id() == null || request.id().isBlank()) {
+            throw new IllegalArgumentException("delete requires document id");
+        }
+        ShardWriter shardWriter = writers.computeIfAbsent(request.shardId(), this::openShardWriter);
+        synchronized (shardWriter) {
+            shardWriter.writer.deleteDocuments(new Term("_id", request.id()));
+            shardWriter.writer.commit();
+        }
+        return new IndexDocumentResponse(request.indexName(), request.shardId(), request.id(), "deleted", true);
     }
 
     @Override
@@ -534,28 +565,31 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         }
         ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
         Query query = query(request.query(), request.mappings());
-        List<Document> updatedDocuments = new ArrayList<>();
+        long updated = 0;
         synchronized (shardWriter) {
             try (DirectoryReader reader = DirectoryReader.open(shardWriter.writer)) {
                 IndexSearcher searcher = new IndexSearcher(reader);
-                int matched = searcher.count(query);
-                if (matched > 0) {
-                    TopDocs topDocs = searcher.search(query, matched);
-                    var storedFields = searcher.storedFields();
+                var storedFields = searcher.storedFields();
+                ScoreDoc after = null;
+                while (true) {
+                    TopDocs topDocs = searcher.searchAfter(after, query, UPDATE_BY_QUERY_BATCH_SIZE);
+                    if (topDocs.scoreDocs.length == 0) {
+                        break;
+                    }
                     for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
                         var old = storedFields.document(scoreDoc.doc);
                         Map<String, Object> merged = new HashMap<>(source(old));
                         merged.putAll(request.document());
-                        updatedDocuments.add(document(old.get("_index"), shardId, old.get("_id"), merged, request.mappings()));
+                        Document document = document(old.get("_index"), shardId, old.get("_id"), merged, request.mappings());
+                        shardWriter.writer.updateDocument(new Term("_id", document.get("_id")), document);
+                        updated++;
                     }
+                    after = topDocs.scoreDocs[topDocs.scoreDocs.length - 1];
                 }
-            }
-            for (Document document : updatedDocuments) {
-                shardWriter.writer.updateDocument(new Term("_id", document.get("_id")), document);
             }
             shardWriter.writer.commit();
         }
-        return new ByQueryResponse(null, "update_by_query", "updated=" + updatedDocuments.size());
+        return new ByQueryResponse(null, "update_by_query", "updated=" + updated);
     }
 
     @Override
@@ -589,12 +623,47 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 deleteRecursively(PathUtil.walDataPath(basePath, physicalIndexName));
                 deleteRecursively(PathUtil.sharedDataPath(basePath, physicalIndexName));
                 deleteRecursively(PathUtil.sharedTempPath(basePath, physicalIndexName));
+            } catch (Exception e) {
+                failure = addFailure(failure, e instanceof IOException ioException ? ioException : new IOException(e));
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    @Override
+    public void retryPendingUploads(Collection<ShardId> shardIds) throws IOException {
+        IOException failure = null;
+        for (ShardId shardId : shardIds) {
+            try {
+                ShardWriter shardWriter = writers.get(shardId);
+                if (shardWriter != null) {
+                    synchronized (shardWriter) {
+                        shardWriter.directory.publishLocalCommit();
+                    }
+                } else {
+                    Path walPath = PathUtil.walDataPath(basePath, physicalIndexName(shardId));
+                    if (!Files.isDirectory(walPath) || !hasCommittedSegmentFile(walPath)) {
+                        discardPendingUploads(shardId);
+                        continue;
+                    }
+                    try (S3CachingDirectory directory = openShardDirectory(shardId, remoteSnapshotStatuses())) {
+                        directory.publishLocalCommit();
+                    }
+                }
             } catch (IOException e) {
                 failure = addFailure(failure, e);
             }
         }
         if (failure != null) {
             throw failure;
+        }
+    }
+
+    private void discardPendingUploads(ShardId shardId) {
+        try (ManifestManager manifestManager = openManifestManager()) {
+            manifestManager.discardPendingUploads(physicalIndexName(shardId));
         }
     }
 
@@ -623,17 +692,17 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             boolean includeWalFiles
     ) throws IOException {
         String physicalIndexName = physicalIndexName(shardId);
-        ManifestOptions manifestOptions = new ManifestOptions(
-                bucket
-        );
-        ManifestManager manifestManager = new ManifestManager(manifestOptions, remoteObjectStore, metadataManager);
         return new S3CachingDirectory(
                 new S3DirectoryOptions(basePath, physicalIndexName),
                 new S3LockFactory(),
-                manifestManager,
+                openManifestManager(),
                 readableRemoteStatuses,
                 includeWalFiles
         );
+    }
+
+    private ManifestManager openManifestManager() {
+        return new ManifestManager(new ManifestOptions(bucket), remoteObjectStore, metadataManager);
     }
 
     private List<IndexFileStatus> remoteSnapshotStatuses() {
@@ -1193,6 +1262,18 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
 
     private String physicalIndexName(ShardId shardId) {
         return shardId.indexName() + "__shard_" + shardId.shardNumber();
+    }
+
+    private boolean hasCommittedSegmentFile(Path walPath) throws IOException {
+        try (var paths = Files.list(walPath)) {
+            return paths
+                    .map(path -> path.getFileName().toString())
+                    .anyMatch(this::isCommittedSegmentFile);
+        }
+    }
+
+    private boolean isCommittedSegmentFile(String name) {
+        return name.startsWith("segments_") && !name.startsWith("pending_segments_");
     }
 
     @Override

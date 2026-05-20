@@ -22,7 +22,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.BooleanSupplier;
+import java.util.zip.CRC32;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -143,6 +147,80 @@ public class S3CachingDirectoryTest {
         }
     }
 
+    @Test
+    public void testSharedCacheIsRefreshedWhenRemoteMetadataChangesForSameLogicalFile() throws IOException {
+        MemMockProvider metadata = new MemMockProvider();
+        MapRemoteObjectStore remote = new MapRemoteObjectStore();
+        String indexName = "test-index";
+        String fileName = "segments_1";
+        byte[] stale = new byte[]{1};
+        byte[] current = new byte[]{2};
+        Path sharedFile = PathUtil.sharedDataPath(tempDir, indexName).resolve(fileName);
+        Files.createDirectories(sharedFile.getParent());
+        Files.write(sharedFile, stale);
+
+        String objectKey = indexName + "/_data/" + fileName + ".current";
+        remote.putObject(objectKey, current);
+        int epoch = metadata.commitFile(new IndexFile(
+                indexName,
+                fileName,
+                "_data",
+                objectKey,
+                current.length,
+                crc32(current),
+                System.currentTimeMillis()
+        ));
+        metadata.updateFileStatus(indexName, fileName, epoch, IndexFileStatus.UPLOADING);
+        metadata.updateFileStatus(indexName, fileName, epoch, IndexFileStatus.CLEAN);
+
+        ManifestManager manager = new ManifestManager(new ManifestOptions("test-bucket"), remote, metadata);
+        try (S3CachingDirectory directory = new S3CachingDirectory(
+                new S3DirectoryOptions(tempDir, indexName),
+                new S3LockFactory(),
+                manager,
+                List.of(IndexFileStatus.CLEAN, IndexFileStatus.PINNED),
+                false
+        )) {
+            byte[] actual = new byte[1];
+            try (IndexInput input = directory.openInput(fileName, IOContext.DEFAULT)) {
+                input.readBytes(actual, 0, actual.length);
+            }
+            assertArrayEquals(current, actual);
+        }
+    }
+
+    @Test
+    public void testPublishLocalCommitRetriesFailedUploadWithoutNewCommit() throws IOException {
+        MemMockProvider metadata = new MemMockProvider();
+        FailingRemoteObjectStore remote = new FailingRemoteObjectStore("_0.si");
+        ManifestManager manager = new ManifestManager(new ManifestOptions("test-bucket"), remote, metadata);
+        try (S3CachingDirectory directory = new S3CachingDirectory(
+                new S3DirectoryOptions(tempDir, "test-index"),
+                new S3LockFactory(),
+                manager
+        )) {
+            writeFile(directory, "_0.si", new byte[]{1});
+            directory.sync(List.of("_0.si"));
+            writeFile(directory, "segments_1", new byte[]{2});
+            directory.sync(List.of("segments_1"));
+            directory.syncMetaData();
+
+            waitUntil(() -> metadata.fileMetadata("test-index", "_0.si") != null
+                    && metadata.fileMetadata("test-index", "_0.si").getStatus() == IndexFileStatus.UPLOADING);
+
+            remote.failName(null);
+            waitUntil(() -> {
+                try {
+                    directory.publishLocalCommit();
+                    return metadata.listAll("test-index", List.of(IndexFileStatus.CLEAN)).size() == 2;
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            assertEquals(2, metadata.listAll("test-index", List.of(IndexFileStatus.CLEAN)).size());
+        }
+    }
+
     private S3CachingDirectory newDirectory(String indexName, MemMockProvider metadata) throws IOException {
         ManifestOptions manifestOptions = new ManifestOptions("test-bucket");
         ManifestManager manager = new ManifestManager(manifestOptions, new NoopRemoteObjectStore(), metadata);
@@ -167,20 +245,31 @@ public class S3CachingDirectoryTest {
         }
     }
 
+    private long crc32(byte[] bytes) {
+        CRC32 crc32 = new CRC32();
+        crc32.update(bytes);
+        return crc32.getValue();
+    }
+
     private void waitForUploads(MemMockProvider metadata, String indexName, int expectedCleanFiles) {
+        waitUntil(() -> metadata.listAll(indexName, List.of(IndexFileStatus.CLEAN)).size() == expectedCleanFiles);
+        assertEquals(expectedCleanFiles, metadata.listAll(indexName, List.of(IndexFileStatus.CLEAN)).size());
+    }
+
+    private void waitUntil(BooleanSupplier condition) {
         long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (System.nanoTime() < deadline) {
-            if (metadata.listAll(indexName, List.of(IndexFileStatus.CLEAN)).size() == expectedCleanFiles) {
+            if (condition.getAsBoolean()) {
                 return;
             }
             Thread.onSpinWait();
         }
-        assertEquals(expectedCleanFiles, metadata.listAll(indexName, List.of(IndexFileStatus.CLEAN)).size());
+        throw new AssertionError("condition was not met before timeout");
     }
 
     private static class NoopRemoteObjectStore implements RemoteObjectStore {
         @Override
-        public void put(String key, Path source) {
+        public void put(String key, Path source) throws IOException {
         }
 
         @Override
@@ -189,7 +278,43 @@ public class S3CachingDirectoryTest {
         }
 
         @Override
-        public void delete(Collection<String> keys) {
+        public void delete(Collection<String> keys) throws IOException {
+        }
+    }
+
+    private static class FailingRemoteObjectStore extends NoopRemoteObjectStore {
+        private String failedName;
+
+        private FailingRemoteObjectStore(String failedName) {
+            this.failedName = failedName;
+        }
+
+        private void failName(String failedName) {
+            this.failedName = failedName;
+        }
+
+        @Override
+        public void put(String key, Path source) throws IOException {
+            if (failedName != null && key.contains(failedName)) {
+                throw new IOException("upload intentionally failed");
+            }
+        }
+    }
+
+    private static class MapRemoteObjectStore extends NoopRemoteObjectStore {
+        private final Map<String, byte[]> objects = new HashMap<>();
+
+        private void putObject(String key, byte[] bytes) {
+            objects.put(key, bytes);
+        }
+
+        @Override
+        public void get(String key, Path target) throws IOException {
+            byte[] bytes = objects.get(key);
+            if (bytes == null) {
+                throw new NoSuchFileException(key);
+            }
+            Files.write(target, bytes);
         }
     }
 }

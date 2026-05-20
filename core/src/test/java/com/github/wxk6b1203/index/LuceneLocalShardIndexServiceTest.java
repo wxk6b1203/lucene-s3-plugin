@@ -2,6 +2,7 @@ package com.github.wxk6b1203.index;
 
 import com.github.wxk6b1203.cluster.FieldMapping;
 import com.github.wxk6b1203.cluster.ShardId;
+import com.github.wxk6b1203.metadata.common.IndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.mem.MemMockProvider;
 import com.github.wxk6b1203.search.ByQueryRequest;
@@ -191,6 +192,81 @@ public class LuceneLocalShardIndexServiceTest {
             assertTrue(ids.contains("doc-3"));
             assertFalse(ids.contains("doc-2"));
         }
+    }
+
+    @Test
+    public void testShardReadsAndWritesFromCleanRemoteSnapshotWhenLocalDataIsLostEverywhere() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        RemoteObjectStore remote = new LocalFileRemoteObjectStore(tempDir.resolve("remote"));
+
+        try (LuceneLocalShardIndexService firstOwner = new LuceneLocalShardIndexService(
+                tempDir.resolve("node-1"),
+                "bucket",
+                metadata,
+                remote
+        )) {
+            firstOwner.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of("title", "remote-clean")));
+            waitForCleanSnapshot(metadata, "books__shard_0");
+        }
+
+        try (LuceneLocalShardIndexService recoveredOwner = new LuceneLocalShardIndexService(
+                tempDir.resolve("node-2-empty-local"),
+                "bucket",
+                metadata,
+                remote
+        )) {
+            var remoteRead = recoveredOwner.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            List.of(),
+                            List.of(),
+                            null,
+                            Map.of(),
+                            "remote"
+                    )
+            );
+            assertEquals(List.of("doc-1"), remoteRead.hits().stream().map(hit -> hit.id()).toList());
+
+            recoveredOwner.index(new IndexDocumentRequest("books", shardId, "doc-2", Map.of("title", "recovered")));
+            waitForCleanSnapshot(metadata, "books__shard_0");
+            var afterWrite = recoveredOwner.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("match_all", Map.of()), List.of(), null, null, 0, 10)
+            );
+            assertEquals(List.of("doc-1", "doc-2"), afterWrite.hits().stream().map(hit -> hit.id()).sorted().toList());
+        }
+    }
+
+    @Test
+    public void testRetryPendingUploadsDiscardsUnrecoverablePendingMetadataWithoutWal() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        String physicalIndexName = "books__shard_0";
+        metadata.commitFile(new IndexFile(physicalIndexName, "_1.si", 1, 7));
+        int segmentEpoch = metadata.commitFile(new IndexFile(physicalIndexName, "segments_2", 1, 9));
+        metadata.updateFileStatus(physicalIndexName, "segments_2", segmentEpoch, IndexFileStatus.UPLOADING);
+
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir.resolve("node-2"),
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.retryPendingUploads(List.of(shardId));
+        }
+
+        assertTrue(metadata.listAll(physicalIndexName, List.of(
+                IndexFileStatus.DIRTY,
+                IndexFileStatus.UPLOADING
+        )).isEmpty());
     }
 
     @Test

@@ -12,14 +12,20 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ManifestManagerTest {
@@ -60,7 +66,9 @@ public class ManifestManagerTest {
         waitUntil(() -> metadata.fileMetadata("books", "segments_1").getStatus() == IndexFileStatus.CLEAN);
         manager.close();
 
-        assertEquals(List.of("books/_data/_0.si", "books/_data/segments_1"), remote.puts);
+        assertEquals(2, remote.puts.size());
+        assertTrue(remote.puts.get(0).startsWith("books/_data/_0.si."));
+        assertTrue(remote.puts.get(1).startsWith("books/_data/segments_1."));
     }
 
     @Test
@@ -114,11 +122,75 @@ public class ManifestManagerTest {
 
         assertEquals(1, metadata.fileMetadata("books", "_0.si").getEpoch());
         assertEquals(1, metadata.fileMetadata("books", "segments_1").getEpoch());
-        assertEquals(List.of(
-                "books/_data/_0.si",
-                "books/_data/_0.si",
-                "books/_data/segments_1"
-        ), remote.puts);
+        assertEquals(3, remote.puts.size());
+        assertTrue(remote.puts.get(0).startsWith("books/_data/_0.si."));
+        assertEquals(remote.puts.get(0), remote.puts.get(1));
+        assertTrue(remote.puts.get(2).startsWith("books/_data/segments_1."));
+    }
+
+    @Test
+    public void testDuplicatePendingUploadDoesNotUploadSameEpochTwiceOrPublishSegmentsEarly() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        BlockingRemoteObjectStore remote = new BlockingRemoteObjectStore("_0.si");
+        ManifestOptions options = new ManifestOptions("bucket");
+        ManifestManager manager = new ManifestManager(options, remote, metadata);
+        Path data = tempDir.resolve("_0.si");
+        Path segments = tempDir.resolve("segments_1");
+        Files.write(data, new byte[]{1});
+        Files.write(segments, new byte[]{2});
+
+        manager.commit(List.of(
+                new CommitingIndexFile("books", data),
+                new CommitingIndexFile("books", segments)
+        ));
+        assertTrue(remote.awaitBlockedPut());
+
+        manager.commit(List.of(
+                new CommitingIndexFile("books", data),
+                new CommitingIndexFile("books", segments)
+        ));
+        Thread.sleep(200);
+
+        assertEquals(1, remote.puts.size());
+        assertTrue(remote.puts.getFirst().startsWith("books/_data/_0.si."));
+        assertEquals(IndexFileStatus.DIRTY, metadata.fileMetadata("books", "segments_1").getStatus());
+
+        remote.releaseBlockedPut();
+        waitUntil(() -> metadata.fileMetadata("books", "segments_1").getStatus() == IndexFileStatus.CLEAN);
+        manager.close();
+
+        assertEquals(2, remote.puts.size());
+        assertTrue(remote.puts.get(1).startsWith("books/_data/segments_1."));
+    }
+
+    @Test
+    public void testStaleDataUploadDoesNotPublishSegmentsAfterMetadataEpochChanges() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        BlockingRemoteObjectStore remote = new BlockingRemoteObjectStore("_0.si");
+        ManifestOptions options = new ManifestOptions("bucket");
+        ManifestManager manager = new ManifestManager(options, remote, metadata);
+        Path data = tempDir.resolve("_0.si");
+        Path segments = tempDir.resolve("segments_1");
+        Files.write(data, new byte[]{1});
+        Files.write(segments, new byte[]{2});
+
+        manager.commit(List.of(
+                new CommitingIndexFile("books", data),
+                new CommitingIndexFile("books", segments)
+        ));
+        assertTrue(remote.awaitBlockedPut());
+
+        Files.write(data, new byte[]{3});
+        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        waitUntil(() -> metadata.fileMetadata("books", "_0.si").getEpoch() == 2
+                && metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.CLEAN);
+
+        remote.releaseBlockedPut();
+        Thread.sleep(200);
+        manager.close();
+
+        assertEquals(IndexFileStatus.DIRTY, metadata.fileMetadata("books", "segments_1").getStatus());
+        assertFalse(remote.puts.stream().anyMatch(key -> key.contains("segments_1")));
     }
 
     @Test
@@ -145,6 +217,33 @@ public class ManifestManagerTest {
     }
 
     @Test
+    public void testDirtyMetadataUsesChecksumWhenFileNameSizeAndModifiedTimeAreReused() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        RecordingRemoteObjectStore remote = new RecordingRemoteObjectStore();
+        ManifestOptions options = new ManifestOptions("bucket");
+        ManifestManager manager = new ManifestManager(options, remote, metadata);
+        Path data = tempDir.resolve("_0.si");
+        Files.write(data, new byte[]{1, 2});
+        FileTime modifiedTime = Files.getLastModifiedTime(data);
+
+        remote.failName("_0.si");
+        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.UPLOADING);
+        long firstChecksum = metadata.fileMetadata("books", "_0.si").getChecksum();
+
+        remote.failName(null);
+        Files.write(data, new byte[]{3, 4});
+        Files.setLastModifiedTime(data, modifiedTime);
+        manager.commit(List.of(new CommitingIndexFile("books", data)));
+        waitUntil(() -> metadata.fileMetadata("books", "_0.si").getStatus() == IndexFileStatus.CLEAN);
+        manager.close();
+
+        assertEquals(2, metadata.fileMetadata("books", "_0.si").getEpoch());
+        assertEquals(2, metadata.fileMetadata("books", "_0.si").getSize());
+        assertTrue(firstChecksum != metadata.fileMetadata("books", "_0.si").getChecksum());
+    }
+
+    @Test
     public void testDeleteIndexShardsRemovesRemoteObjectsAndMetadata() throws Exception {
         MemMockProvider metadata = new MemMockProvider();
         RecordingRemoteObjectStore remote = new RecordingRemoteObjectStore();
@@ -163,10 +262,9 @@ public class ManifestManagerTest {
         manager.deleteIndexShards("books", 1);
         manager.close();
 
-        assertEquals(Set.of(
-                "books__shard_0/_data/_0.si",
-                "books__shard_0/_data/segments_1"
-        ), Set.copyOf(remote.deletes));
+        assertEquals(2, Set.copyOf(remote.deletes).size());
+        assertTrue(remote.deletes.stream().anyMatch(key -> key.startsWith("books__shard_0/_data/_0.si.")));
+        assertTrue(remote.deletes.stream().anyMatch(key -> key.startsWith("books__shard_0/_data/segments_1.")));
         assertTrue(metadata.listAll("books__shard_0", List.of(
                 IndexFileStatus.DIRTY,
                 IndexFileStatus.UPLOADING,
@@ -187,8 +285,8 @@ public class ManifestManagerTest {
     }
 
     private static class RecordingRemoteObjectStore implements RemoteObjectStore {
-        private final List<String> puts = new ArrayList<>();
-        private final List<String> deletes = new ArrayList<>();
+        protected final List<String> puts = Collections.synchronizedList(new ArrayList<>());
+        protected final List<String> deletes = Collections.synchronizedList(new ArrayList<>());
         private String failedName;
 
         private void failName(String failedName) {
@@ -198,7 +296,7 @@ public class ManifestManagerTest {
         @Override
         public void put(String key, Path source) throws IOException {
             puts.add(key);
-            if (failedName != null && key.endsWith(failedName)) {
+            if (failedName != null && key.contains(failedName)) {
                 throw new IOException("upload intentionally failed");
             }
         }
@@ -211,6 +309,41 @@ public class ManifestManagerTest {
         @Override
         public void delete(Collection<String> keys) {
             deletes.addAll(keys);
+        }
+    }
+
+    private static class BlockingRemoteObjectStore extends RecordingRemoteObjectStore {
+        private final String blockedName;
+        private final CountDownLatch blockedPutStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseBlockedPut = new CountDownLatch(1);
+        private final AtomicBoolean blocked = new AtomicBoolean();
+
+        private BlockingRemoteObjectStore(String blockedName) {
+            this.blockedName = blockedName;
+        }
+
+        @Override
+        public void put(String key, Path source) throws IOException {
+            super.put(key, source);
+            if (key.contains(blockedName) && blocked.compareAndSet(false, true)) {
+                blockedPutStarted.countDown();
+                try {
+                    if (!releaseBlockedPut.await(5, TimeUnit.SECONDS)) {
+                        throw new IOException("blocked put was not released");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted while waiting for blocked put release", e);
+                }
+            }
+        }
+
+        private boolean awaitBlockedPut() throws InterruptedException {
+            return blockedPutStarted.await(5, TimeUnit.SECONDS);
+        }
+
+        private void releaseBlockedPut() {
+            releaseBlockedPut.countDown();
         }
     }
 }

@@ -11,8 +11,7 @@ public enum Hierarchy {
     SHARED("_shared"),
     WAL("_wal"),
     DATA("_data"),
-    TEMP("_temp"),
-    STATE("_state");
+    TEMP("_temp");
     @JsonValue
     public final String path;
     @JsonCreator

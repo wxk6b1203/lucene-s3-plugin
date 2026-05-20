@@ -6,6 +6,7 @@ import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 import com.github.wxk6b1203.store.directory.Hierarchy;
+import com.github.wxk6b1203.store.common.FileChecksums;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
 import com.github.wxk6b1203.store.object.S3RemoteObjectStore;
@@ -22,12 +23,15 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class ManifestManager implements AutoCloseable {
+    private static final Set<UploadKey> IN_FLIGHT_UPLOADS = ConcurrentHashMap.newKeySet();
+
     private final RemoteObjectStore remoteObjectStore;
     private final ManifestMetadataManager metadataManager;
     private final ExecutorService uploadWorkerPool;
@@ -58,16 +62,17 @@ public class ManifestManager implements AutoCloseable {
         List<PendingUpload> pendingUploads = new ArrayList<>();
         for (CommitingIndexFile indexFile : indexFiles) {
             long size = Files.size(indexFile.filePath());
+            long checksum = FileChecksums.crc32(indexFile.filePath());
             long modifiedTime = Files.getLastModifiedTime(indexFile.filePath()).toMillis();
             String fileName = indexFile.filePath().getFileName().toString();
-            String objectKey = PathUtil.s3ObjectKey(indexFile.indexName(), fileName);
+            String objectKey = remoteObjectKey(indexFile.indexName(), fileName, checksum, size);
             IndexFile file = new IndexFile(
                     indexFile.indexName(),
                     fileName,
                     Hierarchy.DATA.path,
                     objectKey,
                     size,
-                    0,
+                    checksum,
                     modifiedTime
             );
             IndexFileMetadata metadata = uploadMetadata(file);
@@ -106,6 +111,26 @@ public class ManifestManager implements AutoCloseable {
         for (String indexName : indexNames) {
             metadataManager.deleteAll(indexName);
         }
+    }
+
+    public void discardPendingUploads(String indexName) {
+        List<IndexFileStatus> pendingStatuses = List.of(IndexFileStatus.DIRTY, IndexFileStatus.UPLOADING);
+        List<IndexFileMetadata> pendingFiles = metadataManager.listAll(indexName, pendingStatuses);
+        if (pendingFiles.isEmpty()) {
+            return;
+        }
+        if (remoteObjectStore != null) {
+            try {
+                Set<String> objectKeys = new LinkedHashSet<>();
+                for (IndexFileMetadata file : pendingFiles) {
+                    objectKeys.add(objectKey(file));
+                }
+                remoteObjectStore.delete(objectKeys);
+            } catch (IOException e) {
+                log.warn("Failed to delete abandoned pending objects for {}", indexName, e);
+            }
+        }
+        metadataManager.deleteByStatus(indexName, pendingStatuses);
     }
 
     private IndexFileMetadata uploadMetadata(IndexFile file) {
@@ -151,6 +176,10 @@ public class ManifestManager implements AutoCloseable {
     }
 
     private boolean upload(Path source, IndexFileMetadata metadata) {
+        UploadKey uploadKey = new UploadKey(metadata.getObjectKey(), metadata.getEpoch());
+        if (!IN_FLIGHT_UPLOADS.add(uploadKey)) {
+            return false;
+        }
         try {
             ensureRemoteObjectStore();
             metadataManager.updateFileStatus(
@@ -159,6 +188,9 @@ public class ManifestManager implements AutoCloseable {
                     metadata.getEpoch(),
                     IndexFileStatus.UPLOADING
             );
+            if (!stillCurrent(metadata, IndexFileStatus.UPLOADING)) {
+                return false;
+            }
             remoteObjectStore.put(metadata.getObjectKey(), source);
             metadataManager.updateFileStatus(
                     metadata.getIndexName(),
@@ -166,11 +198,21 @@ public class ManifestManager implements AutoCloseable {
                     metadata.getEpoch(),
                     IndexFileStatus.CLEAN
             );
-            return true;
+            return stillCurrent(metadata, IndexFileStatus.CLEAN);
         } catch (Exception e) {
             log.error("Failed to upload index file {}/{}", metadata.getIndexName(), metadata.getName(), e);
             return false;
+        } finally {
+            IN_FLIGHT_UPLOADS.remove(uploadKey);
         }
+    }
+
+    private boolean stillCurrent(IndexFileMetadata expected, IndexFileStatus status) {
+        IndexFileMetadata current = metadataManager.fileMetadata(expected.getIndexName(), expected.getName());
+        return current != null
+                && current.getEpoch() == expected.getEpoch()
+                && Objects.equals(current.getObjectKey(), expected.getObjectKey())
+                && current.getStatus() == status;
     }
 
     private void ensureRemoteObjectStore() throws IOException {
@@ -194,6 +236,10 @@ public class ManifestManager implements AutoCloseable {
                 : metadata.getObjectKey();
     }
 
+    private String remoteObjectKey(String indexName, String fileName, long checksum, long size) {
+        return PathUtil.s3ObjectKey(indexName, fileName + "." + Long.toUnsignedString(checksum, 16) + "." + size);
+    }
+
     private String physicalIndexName(String indexName, int shard) {
         return indexName + "__shard_" + shard;
     }
@@ -203,6 +249,9 @@ public class ManifestManager implements AutoCloseable {
     }
 
     private record PendingUpload(Path source, IndexFileMetadata metadata) {
+    }
+
+    private record UploadKey(String objectKey, long epoch) {
     }
 
     @Override

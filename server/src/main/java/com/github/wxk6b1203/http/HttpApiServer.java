@@ -5,6 +5,7 @@ import com.github.wxk6b1203.cluster.ClusterNode;
 import com.github.wxk6b1203.cluster.ClusterStateRepository;
 import com.github.wxk6b1203.cluster.ClusterCoordinator;
 import com.github.wxk6b1203.cluster.ClusterState;
+import com.github.wxk6b1203.cluster.BalancedShardAllocator;
 import com.github.wxk6b1203.cluster.DefaultClusterIndexService;
 import com.github.wxk6b1203.cluster.FieldMapping;
 import com.github.wxk6b1203.cluster.HashShardRouter;
@@ -17,6 +18,7 @@ import com.github.wxk6b1203.cluster.MasterOnlyClusterStateRepository;
 import com.github.wxk6b1203.cluster.NodeRole;
 import com.github.wxk6b1203.cluster.NoopClusterCoordinator;
 import com.github.wxk6b1203.cluster.ShardId;
+import com.github.wxk6b1203.cluster.ShardAllocator;
 import com.github.wxk6b1203.cluster.ShardRouting;
 import com.github.wxk6b1203.cluster.ShardState;
 import com.github.wxk6b1203.cluster.WriteRoute;
@@ -36,6 +38,7 @@ import com.github.wxk6b1203.search.SearchHit;
 import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.errors.NotMasterException;
 import com.github.wxk6b1203.index.IndexDocumentRequest;
+import com.github.wxk6b1203.index.IndexDocumentResponse;
 import com.github.wxk6b1203.index.LocalShardIndexService;
 import com.github.wxk6b1203.index.LuceneLocalShardIndexService;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
@@ -48,25 +51,32 @@ import com.github.wxk6b1203.store.object.LocalFileRemoteObjectStore;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
 import com.github.wxk6b1203.store.object.S3RemoteObjectStore;
 import com.github.wxk6b1203.util.JsonUtil;
+import io.vertx.core.Context;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
-import io.vertx.ext.web.client.WebClient;
 import io.etcd.jetcd.Client;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.List;
 import java.util.Map;
@@ -88,19 +98,21 @@ public class HttpApiServer implements AutoCloseable {
     private static final String FORWARDED_HEADER = "x-lucene-s3-forwarded";
     private static final String OWNER_TERM_HEADER = "x-lucene-s3-owner-term";
     private static final String ALLOCATION_EPOCH_HEADER = "x-lucene-s3-allocation-epoch";
+    private static final String DOCUMENT_ID_HEADER = "x-lucene-s3-document-id";
 
     private final Vertx vertx;
     private final int port;
     private final ClusterStateRepository clusterStateRepository;
     private final ClusterIndexService indexService;
     private final IndexLifecycleService lifecycleService;
+    private final ShardAllocator shardAllocator;
     private final SearchPlanner searchPlanner;
     private final WriteRouter writeRouter;
     private final LocalShardIndexService localShardIndexService;
     private final ClusterCoordinator clusterCoordinator;
     private final Client etcdClient;
     private final ClusterNode localNode;
-    private final WebClient webClient;
+    private final HttpClient forwardingClient;
     private final ManifestMetadataManager manifestMetadataManager;
     private final RemoteObjectStore remoteObjectStore;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
@@ -141,7 +153,10 @@ public class HttpApiServer implements AutoCloseable {
                 roles,
                 Instant.now()
         );
-        this.webClient = WebClient.create(vertx);
+        this.forwardingClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5))
+                .build();
         if (options.etcdEnabled()) {
             this.etcdClient = Client.builder().endpoints(options.etcdEndpoints()).build();
             EtcdClusterStateRepository etcdRepository = new EtcdClusterStateRepository(
@@ -167,8 +182,10 @@ public class HttpApiServer implements AutoCloseable {
             this.clusterStateRepository = new InMemoryClusterStateRepository(options.clusterName(), localNode);
             this.clusterCoordinator = new NoopClusterCoordinator();
         }
+        this.shardAllocator = new BalancedShardAllocator();
         DefaultClusterIndexService clusterIndexService = new DefaultClusterIndexService(
-                new MasterOnlyClusterStateRepository(clusterStateRepository, clusterCoordinator)
+                new MasterOnlyClusterStateRepository(clusterStateRepository, clusterCoordinator),
+                shardAllocator
         );
         this.indexService = clusterIndexService;
         this.lifecycleService = clusterIndexService;
@@ -218,17 +235,21 @@ public class HttpApiServer implements AutoCloseable {
         router.post("/_internal/:index/:shard/_search").handler(this::internalShardSearch);
         router.post("/_internal/:index/:shard/_pit").handler(this::internalShardOpenPit);
         router.delete("/_internal/_pit/:pit").handler(this::internalShardClosePit);
+        router.post("/_internal/:index/:shard/_bulk").handler(this::internalShardBulk);
         router.post("/_internal/:index/:shard/_delete_by_query").handler(this::internalShardDeleteByQuery);
         router.post("/_internal/:index/:shard/_update_by_query").handler(this::internalShardUpdateByQuery);
         router.get("/_cluster/state").handler(this::clusterState);
         router.get("/_nodes").handler(this::nodes);
+        router.post("/_bulk").handler(this::bulk);
         router.delete("/_pit").handler(this::closePointInTime);
         router.put("/:index").handler(this::createIndex);
         router.delete("/:index").handler(this::deleteIndex);
         router.get("/:index/_mapping").handler(this::getMapping);
         router.put("/:index/_mapping").handler(this::putMapping);
+        router.post("/:index/_bulk").handler(this::bulk);
         router.post("/:index/_doc").handler(this::indexDocument);
         router.post("/:index/_doc/:id").handler(this::indexDocument);
+        router.delete("/:index/_doc/:id").handler(this::deleteDocument);
         router.post("/:index/_search").handler(this::search);
         router.post("/:index/_pit").handler(this::openPointInTime);
         router.post("/:index/_search_plan").handler(this::searchPlan);
@@ -340,15 +361,73 @@ public class HttpApiServer implements AutoCloseable {
     private void indexDocument(RoutingContext context) {
         try {
             String index = context.pathParam("index");
+            String id = documentId(context);
             String routing = context.queryParams().get("routing");
             if (routing == null || routing.isBlank()) {
-                routing = context.pathParam("id");
+                routing = id;
             }
-            ClusterState state = clusterStateRepository.current();
+            ClusterState state = writableClusterState(context);
+            if (state == null) {
+                return;
+            }
+            IndexSettings settings = indexSettings(index, state);
+            WriteRoute route = writeRouter.route(index, routing, state);
+            log.debug("index request node={} uri={} forwarded={} routeNode={} shard={} ownerTerm={} epoch={}",
+                    localNode.id(),
+                    context.request().uri(),
+                    context.request().getHeader(FORWARDED_HEADER),
+                    route.nodeId(),
+                    route.shardId().routeKey(),
+                    route.ownerTerm(),
+                    route.allocationEpoch());
+            if (!localNode.id().equals(route.nodeId())) {
+                if (isForwardedShardWrite(context)) {
+                    throw new IllegalStateException("forwarded write request did not reach shard owner node: "
+                            + route.shardId().routeKey());
+                }
+                Map<String, String> headers = new HashMap<>(writeFenceHeaders(route));
+                headers.put(DOCUMENT_ID_HEADER, id);
+                forward(context, route.nodeId(), route.host(), route.httpPort(), headers);
+                return;
+            }
+            if (context.request().getHeader(FORWARDED_HEADER) != null) {
+                validateForwardedWriteFence(context, route);
+            }
+            validateShardWriteFence(route.shardId(), route.ownerTerm(), route.allocationEpoch());
+            boolean createOnly = "create".equalsIgnoreCase(context.queryParams().get("op_type"));
+            IndexDocumentResponse response = localShardIndexService.index(new IndexDocumentRequest(
+                    index,
+                    route.shardId(),
+                    id,
+                    bodyAsMap(context),
+                    settings.mappings(),
+                    createOnly
+            ));
+            json(context, 201, response);
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private void deleteDocument(RoutingContext context) {
+        try {
+            String index = context.pathParam("index");
+            String id = context.pathParam("id");
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException("delete requires document id");
+            }
+            String routing = context.queryParams().get("routing");
+            if (routing == null || routing.isBlank()) {
+                routing = id;
+            }
+            ClusterState state = writableClusterState(context);
+            if (state == null) {
+                return;
+            }
             IndexSettings settings = indexSettings(index, state);
             WriteRoute route = writeRouter.route(index, routing, state);
             if (!localNode.id().equals(route.nodeId())) {
-                if (context.request().getHeader(FORWARDED_HEADER) != null) {
+                if (isForwardedShardWrite(context)) {
                     throw new IllegalStateException("forwarded write request did not reach shard owner node: "
                             + route.shardId().routeKey());
                 }
@@ -359,13 +438,56 @@ public class HttpApiServer implements AutoCloseable {
                 validateForwardedWriteFence(context, route);
             }
             validateShardWriteFence(route.shardId(), route.ownerTerm(), route.allocationEpoch());
-            json(context, 201, localShardIndexService.index(new IndexDocumentRequest(
+            json(context, 200, localShardIndexService.delete(new IndexDocumentRequest(
                     index,
                     route.shardId(),
-                    context.pathParam("id"),
-                    bodyAsMap(context),
+                    id,
+                    Map.of(),
                     settings.mappings()
             )));
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private void bulk(RoutingContext context) {
+        long started = System.nanoTime();
+        try {
+            List<BulkItemRequest> items = bulkItems(context);
+            ClusterState state = writableClusterState(context);
+            if (state == null) {
+                return;
+            }
+            List<Future<List<BulkItemResult>>> futures = executeBulkItems(items, state);
+            if (futures.isEmpty()) {
+                json(context, 200, Map.of(
+                        "took", (System.nanoTime() - started) / 1_000_000,
+                        "errors", false,
+                        "items", List.of()
+                ));
+                return;
+            }
+            Future.all(futures)
+                    .onSuccess(ignored -> {
+                        BulkItemResponse[] orderedResponses = new BulkItemResponse[items.size()];
+                        futures.stream()
+                                .flatMap(future -> future.result().stream())
+                                .forEach(result -> orderedResponses[result.ordinal()] = result.response());
+                        List<Map<String, Object>> responses = Arrays.stream(orderedResponses)
+                                .map(BulkItemResponse::asMap)
+                                .toList();
+                        boolean errors = Arrays.stream(orderedResponses)
+                                .anyMatch(BulkItemResponse::failed);
+                        json(context, 200, Map.of(
+                                "took", (System.nanoTime() - started) / 1_000_000,
+                                "errors", errors,
+                                "items", responses
+                        ));
+                    })
+                    .onFailure(e -> {
+                        Exception exception = exception(e);
+                        error(context, status(exception), exception);
+                    });
         } catch (Exception e) {
             error(context, status(e), e);
         }
@@ -399,6 +521,7 @@ public class HttpApiServer implements AutoCloseable {
     private void openPointInTime(RoutingContext context) {
         try {
             String index = context.pathParam("index");
+            Map<String, Object> body = bodyAsMap(context);
             ClusterState state = clusterStateRepository.current();
             SearchRequest request = new SearchRequest(
                     index,
@@ -412,9 +535,9 @@ public class HttpApiServer implements AutoCloseable {
                     List.of(),
                     null,
                     Map.of(),
-                    "owner"
+                    readPreference(context, body)
             );
-            SearchPlan plan = searchPlanner.plan(request, state);
+            SearchPlan plan = searchPlan(request, state);
             Duration keepAlive = keepAlive(context);
             List<Future<ShardPit>> futures = plan.targets().stream()
                     .map(target -> executeShardOpenPit(target, keepAlive))
@@ -495,6 +618,54 @@ public class HttpApiServer implements AutoCloseable {
         } catch (Exception e) {
             error(context, status(e), e);
         }
+    }
+
+    private void internalShardBulk(RoutingContext context) {
+        try {
+            String index = context.pathParam("index");
+            int shard = Integer.parseInt(context.pathParam("shard"));
+            ShardId shardId = new ShardId(index, shard);
+            Map<String, Object> body = bodyAsMap(context);
+            Long ownerTerm = longObject(body.get("owner_term"));
+            Long allocationEpoch = longObject(body.get("allocation_epoch"));
+            validateShardWriteFence(shardId, ownerTerm, allocationEpoch);
+            Map<String, FieldMapping> mappings = indexSettings(index, clusterStateRepository.current()).mappings();
+            List<BulkItemResponse> responses = new ArrayList<>();
+            for (Object value : objectList(body.get("items"))) {
+                BulkItemRequest item = internalBulkItem(mapValue(value), index);
+                String id = item.id();
+                try {
+                    responses.add(executeLocalBulkItem(item, shardId, id, mappings));
+                } catch (Exception e) {
+                    responses.add(bulkError(item, id, status(e), e));
+                }
+            }
+            json(context, 200, Map.of(
+                    "errors", responses.stream().anyMatch(BulkItemResponse::failed),
+                    "items", responses.stream().map(BulkItemResponse::asMap).toList()
+            ));
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private BulkItemRequest internalBulkItem(Map<String, Object> value, String defaultIndex) {
+        String action = stringValue(value.get("action"));
+        if (!"index".equals(action) && !"create".equals(action) && !"delete".equals(action)) {
+            throw new IllegalArgumentException("unsupported internal bulk action: " + action);
+        }
+        String index = stringValue(value.get("index"));
+        if (index == null || index.isBlank()) {
+            index = defaultIndex;
+        }
+        if (!defaultIndex.equals(index)) {
+            throw new IllegalArgumentException("internal bulk item index does not match target shard: " + index);
+        }
+        String id = stringValue(value.get("id"));
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException("internal bulk item requires id");
+        }
+        return new BulkItemRequest(action, index, id, null, mapValue(value.get("source")));
     }
 
     private void internalShardDeleteByQuery(RoutingContext context) {
@@ -653,11 +824,292 @@ public class HttpApiServer implements AutoCloseable {
                 .orElseThrow(() -> new IllegalStateException("shard routing not found: " + shardId.routeKey()));
     }
 
+    private ClusterState writableClusterState(RoutingContext context) throws IOException {
+        ClusterState state = clusterStateRepository.current();
+        log.debug("writable state node={} version={} master={} hasUnavailable={}",
+                localNode.id(), state.version(), state.masterNodeId(), hasUnavailableShardOwner(state));
+        if (!hasUnavailableShardOwner(state)) {
+            return state;
+        }
+        if (clusterCoordinator.isMaster()) {
+            log.debug("writable state rebalance start node={}", localNode.id());
+            return clusterStateRepository.update(shardAllocator::rebalance);
+        }
+        if (context != null && forwardToMasterIfNeeded(context)) {
+            return null;
+        }
+        throw new NotMasterException("stale shard owner routing must be rerouted by the current master node");
+    }
+
+    private boolean hasUnavailableShardOwner(ClusterState state) {
+        return state.routingTable().stream()
+                .filter(routing -> routing.state() == ShardState.STARTED)
+                .map(ShardRouting::nodeId)
+                .anyMatch(nodeId -> nodeId == null || !state.nodes().containsKey(nodeId));
+    }
+
     private Map<String, String> writeFenceHeaders(WriteRoute route) {
         return Map.of(
                 OWNER_TERM_HEADER, Long.toString(route.ownerTerm()),
                 ALLOCATION_EPOCH_HEADER, Long.toString(route.allocationEpoch())
         );
+    }
+
+    private boolean isForwardedShardWrite(RoutingContext context) {
+        return context.request().getHeader(FORWARDED_HEADER) != null
+                && context.request().getHeader(OWNER_TERM_HEADER) != null
+                && context.request().getHeader(ALLOCATION_EPOCH_HEADER) != null;
+    }
+
+    private String documentId(RoutingContext context) {
+        String id = context.pathParam("id");
+        if (id != null && !id.isBlank()) {
+            return id;
+        }
+        if (context.request().getHeader(FORWARDED_HEADER) != null) {
+            id = context.request().getHeader(DOCUMENT_ID_HEADER);
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException("missing forwarded document id");
+            }
+            return id;
+        }
+        return UUID.randomUUID().toString();
+    }
+
+    private List<BulkItemRequest> bulkItems(RoutingContext context) {
+        String body = bodyAsString(context);
+        if (body == null || body.isBlank()) {
+            return List.of();
+        }
+        String defaultIndex = context.pathParam("index");
+        List<BulkItemRequest> items = new ArrayList<>();
+        String[] lines = body.split("\\r?\\n");
+        for (int line = 0; line < lines.length; line++) {
+            String actionLine = lines[line].trim();
+            if (actionLine.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> action = JsonUtil.readValueAsMap(actionLine);
+            if (action.size() != 1) {
+                throw new IllegalArgumentException("bulk action line must contain exactly one action at line " + (line + 1));
+            }
+            String actionName = action.keySet().iterator().next();
+            if (!actionName.equals("index") && !actionName.equals("create") && !actionName.equals("delete")) {
+                throw new IllegalArgumentException("unsupported bulk action: " + actionName);
+            }
+            Map<String, Object> metadata = mapValue(action.get(actionName));
+            String index = stringValue(metadata.get("_index"));
+            if (index == null || index.isBlank()) {
+                index = defaultIndex;
+            }
+            if (index == null || index.isBlank()) {
+                throw new IllegalArgumentException("bulk action requires _index at line " + (line + 1));
+            }
+            String id = stringValue(metadata.get("_id"));
+            String routing = stringValue(metadata.get("routing"));
+            if (routing == null || routing.isBlank()) {
+                routing = stringValue(metadata.get("_routing"));
+            }
+            Map<String, Object> source = Map.of();
+            if (!actionName.equals("delete")) {
+                if (++line >= lines.length || lines[line].isBlank()) {
+                    throw new IllegalArgumentException("bulk action requires source after line " + line);
+                }
+                source = JsonUtil.readValueAsMap(lines[line]);
+            }
+            items.add(new BulkItemRequest(actionName, index, id, routing, source));
+        }
+        return items;
+    }
+
+    private List<Future<List<BulkItemResult>>> executeBulkItems(List<BulkItemRequest> items, ClusterState state) {
+        List<Future<List<BulkItemResult>>> futures = new ArrayList<>();
+        Map<BulkShardBatchKey, List<BulkItemPlan>> remoteBatches = new LinkedHashMap<>();
+        for (int ordinal = 0; ordinal < items.size(); ordinal++) {
+            BulkItemRequest item = items.get(ordinal);
+            try {
+                BulkItemPlan plan = bulkItemPlan(ordinal, item, state);
+                if (localNode.id().equals(plan.route().nodeId())) {
+                    futures.add(Future.succeededFuture(List.of(executeLocalBulkPlan(plan))));
+                    continue;
+                }
+                BulkShardBatchKey key = new BulkShardBatchKey(
+                        plan.route().nodeId(),
+                        plan.route().host(),
+                        plan.route().httpPort(),
+                        plan.route().shardId(),
+                        plan.route().ownerTerm(),
+                        plan.route().allocationEpoch()
+                );
+                remoteBatches.computeIfAbsent(key, ignored -> new ArrayList<>()).add(plan);
+            } catch (Exception e) {
+                futures.add(Future.succeededFuture(List.of(new BulkItemResult(
+                        ordinal,
+                        bulkError(item, item.id(), status(e), e)
+                ))));
+            }
+        }
+        remoteBatches.forEach((key, plans) -> futures.add(executeRemoteBulkBatch(key, plans)));
+        return futures;
+    }
+
+    private BulkItemPlan bulkItemPlan(int ordinal, BulkItemRequest item, ClusterState state) {
+        String id = item.id();
+        if (item.action().equals("delete")) {
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException("bulk delete requires _id");
+            }
+        } else if (id == null || id.isBlank()) {
+            id = UUID.randomUUID().toString();
+        }
+        IndexSettings settings = indexSettings(item.index(), state);
+        WriteRoute route = writeRouter.route(item.index(), routingOrId(item.routing(), id), state);
+        return new BulkItemPlan(ordinal, item, id, route, settings.mappings());
+    }
+
+    private BulkItemResult executeLocalBulkPlan(BulkItemPlan plan) {
+        try {
+            validateShardWriteFence(plan.route().shardId(), plan.route().ownerTerm(), plan.route().allocationEpoch());
+            return new BulkItemResult(
+                    plan.ordinal(),
+                    executeLocalBulkItem(plan.item(), plan.route().shardId(), plan.id(), plan.mappings())
+            );
+        } catch (Exception e) {
+            return new BulkItemResult(plan.ordinal(), bulkError(plan.item(), plan.id(), status(e), e));
+        }
+    }
+
+    private BulkItemResponse executeLocalBulkItem(
+            BulkItemRequest item,
+            ShardId shardId,
+            String id,
+            Map<String, FieldMapping> mappings
+    ) throws IOException {
+        if (item.action().equals("delete")) {
+            IndexDocumentResponse response = localShardIndexService.delete(new IndexDocumentRequest(
+                    item.index(),
+                    shardId,
+                    id,
+                    Map.of(),
+                    mappings
+            ));
+            return bulkSuccess(item, response, 200);
+        }
+        IndexDocumentResponse response = localShardIndexService.index(new IndexDocumentRequest(
+                item.index(),
+                shardId,
+                id,
+                item.source(),
+                mappings,
+                item.action().equals("create")
+        ));
+        return bulkSuccess(item, response, 201);
+    }
+
+    private Future<List<BulkItemResult>> executeRemoteBulkBatch(BulkShardBatchKey key, List<BulkItemPlan> plans) {
+        String uri = "/_internal/" + urlPart(key.shardId().indexName())
+                + "/" + key.shardId().shardNumber()
+                + "/_bulk";
+        return remoteJsonRequest("POST", key.host(), key.httpPort(), uri, internalBulkBody(key, plans))
+                .map(response -> remoteBulkBatchResponse(key, plans, response.statusCode(), response.body()))
+                .recover(e -> Future.succeededFuture(plans.stream()
+                        .map(plan -> new BulkItemResult(plan.ordinal(), bulkError(plan.item(), plan.id(), 502, exception(e))))
+                        .toList()));
+    }
+
+    private Map<String, Object> internalBulkBody(BulkShardBatchKey key, List<BulkItemPlan> plans) {
+        return Map.of(
+                "owner_term", key.ownerTerm(),
+                "allocation_epoch", key.allocationEpoch(),
+                "items", plans.stream().map(plan -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("action", plan.item().action());
+                    item.put("index", plan.item().index());
+                    item.put("id", plan.id());
+                    item.put("source", plan.item().source());
+                    return item;
+                }).toList()
+        );
+    }
+
+    private List<BulkItemResult> remoteBulkBatchResponse(
+            BulkShardBatchKey key,
+            List<BulkItemPlan> plans,
+            int status,
+            String body
+    ) {
+        if (status >= 300) {
+            Exception exception = new IllegalStateException("remote shard bulk failed on " + key.nodeId()
+                    + ": status=" + status
+                    + ", body=" + (body == null ? "" : body));
+            return plans.stream()
+                    .map(plan -> new BulkItemResult(plan.ordinal(), bulkError(plan.item(), plan.id(), status, exception)))
+                    .toList();
+        }
+        Map<String, Object> response = body == null || body.isBlank() ? Map.of() : JsonUtil.readValueAsMap(body);
+        List<Object> items = objectList(response.get("items"));
+        List<BulkItemResult> results = new ArrayList<>(plans.size());
+        for (int i = 0; i < plans.size(); i++) {
+            BulkItemPlan plan = plans.get(i);
+            if (i >= items.size()) {
+                results.add(new BulkItemResult(
+                        plan.ordinal(),
+                        bulkError(plan.item(), plan.id(), 502, new IllegalStateException("remote bulk response is missing item"))
+                ));
+                continue;
+            }
+            results.add(new BulkItemResult(plan.ordinal(), bulkResponseFromMap(plan.item(), mapValue(items.get(i)))));
+        }
+        return results;
+    }
+
+    private BulkItemResponse bulkResponseFromMap(BulkItemRequest item, Map<String, Object> response) {
+        Map<String, Object> body = mapValue(response.get(item.action()));
+        Map<String, Object> error = body.get("error") instanceof Map<?, ?> ? mapValue(body.get("error")) : null;
+        return new BulkItemResponse(
+                item.action(),
+                stringValue(body.get("_index")),
+                stringValue(body.get("_id")),
+                intValue(body.get("status"), error == null ? 200 : 400),
+                stringValue(body.get("result")),
+                body.get("shardId"),
+                error
+        );
+    }
+
+    private BulkItemResponse bulkSuccess(BulkItemRequest item, IndexDocumentResponse response, int status) {
+        return new BulkItemResponse(
+                item.action(),
+                response.indexName(),
+                response.id(),
+                status,
+                response.result(),
+                response.shardId(),
+                null
+        );
+    }
+
+    private BulkItemResponse bulkError(BulkItemRequest item, String id, int status, Exception e) {
+        return new BulkItemResponse(
+                item.action(),
+                item.index(),
+                id,
+                status,
+                null,
+                null,
+                Map.of(
+                        "type", e.getClass().getSimpleName(),
+                        "reason", e.getMessage() == null ? "" : e.getMessage()
+                )
+        );
+    }
+
+    private String routingOrId(String routing, String id) {
+        return routing == null || routing.isBlank() ? id : routing;
+    }
+
+    private String urlPart(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     private void validateForwardedWriteFence(RoutingContext context, WriteRoute route) {
@@ -767,16 +1219,14 @@ public class HttpApiServer implements AutoCloseable {
             }
         }
         String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber() + "/_search";
-        return webClient.post(target.httpPort(), target.host(), uri)
-                .putHeader("content-type", "application/json")
-                .sendBuffer(Buffer.buffer(JsonUtil.writeValueAsBytes(request)))
+        return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, request)
                 .map(response -> {
                     if (response.statusCode() >= 300) {
                         throw new IllegalStateException("remote shard search failed on " + target.nodeId()
                                 + ": status=" + response.statusCode()
-                                + ", body=" + response.bodyAsString());
+                                + ", body=" + response.body());
                     }
-                    return JsonUtil.readValue(response.bodyAsString(), SearchResponse.class);
+                    return JsonUtil.readValue(response.body(), SearchResponse.class);
                 });
     }
 
@@ -815,15 +1265,14 @@ public class HttpApiServer implements AutoCloseable {
         String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber()
                 + "/_pit?keep_alive=" + keepAlive.toMillis() + "ms"
                 + "&read_preference=" + readPreference;
-        return webClient.post(target.httpPort(), target.host(), uri)
-                .send()
+        return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, null)
                 .map(response -> {
                     if (response.statusCode() >= 300) {
                         throw new IllegalStateException("remote shard pit open failed on " + target.nodeId()
                                 + ": status=" + response.statusCode()
-                                + ", body=" + response.bodyAsString());
+                                + ", body=" + response.body());
                     }
-                    return new ShardPit(target, JsonUtil.readValue(response.bodyAsString(), PointInTimeResponse.class).id());
+                    return new ShardPit(target, JsonUtil.readValue(response.body(), PointInTimeResponse.class).id());
                 });
     }
 
@@ -838,13 +1287,12 @@ public class HttpApiServer implements AutoCloseable {
                 return Future.failedFuture(e);
             }
         }
-        return webClient.delete(target.httpPort(), target.host(), "/_internal/_pit/" + pitId)
-                .send()
+        return remoteJsonRequest("DELETE", target.host(), target.httpPort(), "/_internal/_pit/" + pitId, null)
                 .map(response -> {
                     if (response.statusCode() >= 300) {
                         throw new IllegalStateException("remote shard pit close failed on " + target.nodeId()
                                 + ": status=" + response.statusCode()
-                                + ", body=" + response.bodyAsString());
+                                + ", body=" + response.body());
                     }
                     return true;
                 });
@@ -1088,16 +1536,14 @@ public class HttpApiServer implements AutoCloseable {
             }
         }
         String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber() + "/_update_by_query";
-        return webClient.post(target.httpPort(), target.host(), uri)
-                .putHeader("content-type", "application/json")
-                .sendBuffer(Buffer.buffer(JsonUtil.writeValueAsBytes(byQueryBody(fencedRequest))))
+        return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, byQueryBody(fencedRequest))
                 .map(response -> {
                     if (response.statusCode() >= 300) {
                         throw new IllegalStateException("remote shard update_by_query failed on " + target.nodeId()
                                 + ": status=" + response.statusCode()
-                                + ", body=" + response.bodyAsString());
+                                + ", body=" + response.body());
                     }
-                    return JsonUtil.readValue(response.bodyAsString(), ByQueryResponse.class);
+                    return JsonUtil.readValue(response.body(), ByQueryResponse.class);
                 });
     }
 
@@ -1113,16 +1559,14 @@ public class HttpApiServer implements AutoCloseable {
             }
         }
         String uri = "/_internal/" + target.shardId().indexName() + "/" + target.shardId().shardNumber() + "/_delete_by_query";
-        return webClient.post(target.httpPort(), target.host(), uri)
-                .putHeader("content-type", "application/json")
-                .sendBuffer(Buffer.buffer(JsonUtil.writeValueAsBytes(byQueryBody(fencedRequest))))
+        return remoteJsonRequest("POST", target.host(), target.httpPort(), uri, byQueryBody(fencedRequest))
                 .map(response -> {
                     if (response.statusCode() >= 300) {
                         throw new IllegalStateException("remote shard delete_by_query failed on " + target.nodeId()
                                 + ": status=" + response.statusCode()
-                                + ", body=" + response.bodyAsString());
+                                + ", body=" + response.body());
                     }
-                    return JsonUtil.readValue(response.bodyAsString(), ByQueryResponse.class);
+                    return JsonUtil.readValue(response.body(), ByQueryResponse.class);
                 });
     }
 
@@ -1177,7 +1621,10 @@ public class HttpApiServer implements AutoCloseable {
     private void updateByQuery(RoutingContext context) {
         try {
             ByQueryRequest request = byQueryRequest(context);
-            ClusterState state = clusterStateRepository.current();
+            ClusterState state = writableClusterState(context);
+            if (state == null) {
+                return;
+            }
             request = withMappings(request, indexSettings(request.indexName(), state).mappings());
             SearchRequest searchRequest = new SearchRequest(
                     request.indexName(),
@@ -1209,7 +1656,11 @@ public class HttpApiServer implements AutoCloseable {
         try {
             String index = context.pathParam("index");
             String routing = context.queryParams().get("routing");
-            WriteRoute route = writeRouter.route(index, routing, clusterStateRepository.current());
+            ClusterState state = writableClusterState(context);
+            if (state == null) {
+                return;
+            }
+            WriteRoute route = writeRouter.route(index, routing, state);
             json(context, 200, Map.of(
                     "shardId", route.shardId(),
                     "nodeId", route.nodeId(),
@@ -1227,7 +1678,10 @@ public class HttpApiServer implements AutoCloseable {
     private void deleteByQuery(RoutingContext context) {
         try {
             ByQueryRequest request = byQueryRequest(context);
-            ClusterState state = clusterStateRepository.current();
+            ClusterState state = writableClusterState(context);
+            if (state == null) {
+                return;
+            }
             request = withMappings(request, indexSettings(request.indexName(), state).mappings());
             SearchRequest searchRequest = new SearchRequest(
                     request.indexName(),
@@ -1742,6 +2196,7 @@ public class HttpApiServer implements AutoCloseable {
         }
         try {
             cleanupExpiredPits();
+            retryOwnedShardUploads();
             runLifecyclePolicies();
         } finally {
             maintenanceRunning.set(false);
@@ -1756,6 +2211,29 @@ public class HttpApiServer implements AutoCloseable {
                         .onFailure(e -> log.warn("failed to close expired point in time {}", pitId, e));
             }
         });
+    }
+
+    private void retryOwnedShardUploads() {
+        ClusterState state;
+        try {
+            state = clusterStateRepository.current();
+        } catch (IOException e) {
+            log.warn("failed to load cluster state for upload retry", e);
+            return;
+        }
+        List<ShardId> shardIds = state.routingTable().stream()
+                .filter(routing -> routing.state() == ShardState.STARTED)
+                .filter(routing -> localNode.id().equals(routing.nodeId()))
+                .map(ShardRouting::shardId)
+                .toList();
+        if (shardIds.isEmpty()) {
+            return;
+        }
+        try {
+            localShardIndexService.retryPendingUploads(shardIds);
+        } catch (Exception e) {
+            log.warn("failed to retry pending shard uploads", e);
+        }
     }
 
     private void runLifecyclePolicies() {
@@ -1836,6 +2314,39 @@ public class HttpApiServer implements AutoCloseable {
         return true;
     }
 
+    private Future<RemoteHttpResponse> remoteJsonRequest(
+            String method,
+            String host,
+            int port,
+            String uri,
+            Object body
+    ) {
+        Context requestContext = Vertx.currentContext();
+        Promise<RemoteHttpResponse> promise = Promise.promise();
+        HttpRequest.BodyPublisher publisher = body == null
+                ? HttpRequest.BodyPublishers.noBody()
+                : HttpRequest.BodyPublishers.ofByteArray(JsonUtil.writeValueAsBytes(body));
+        HttpRequest.Builder request = HttpRequest.newBuilder()
+                .uri(URI.create("http://" + host + ":" + port + uri))
+                .version(HttpClient.Version.HTTP_1_1)
+                .timeout(Duration.ofSeconds(10))
+                .method(method, publisher);
+        if (body != null) {
+            request.header("content-type", "application/json");
+        }
+        forwardingClient.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                .orTimeout(10, TimeUnit.SECONDS)
+                .whenComplete((response, throwable) -> runOnRequestContext(requestContext, () -> {
+                    if (throwable != null) {
+                        Throwable cause = throwable.getCause() == null ? throwable : throwable.getCause();
+                        promise.fail(cause);
+                        return;
+                    }
+                    promise.complete(new RemoteHttpResponse(response.statusCode(), response.body()));
+                }));
+        return promise.future();
+    }
+
     private void forward(RoutingContext context, String targetNodeId, String targetHost, int targetPort) {
         forward(context, targetNodeId, targetHost, targetPort, Map.of());
     }
@@ -1847,37 +2358,65 @@ public class HttpApiServer implements AutoCloseable {
             int targetPort,
             Map<String, String> extraHeaders
     ) {
+        Context requestContext = Vertx.currentContext();
         String body = context.body() == null ? null : context.body().asString();
-        Buffer buffer = body == null ? Buffer.buffer() : Buffer.buffer(body);
-        var request = webClient
-                .request(context.request().method(), targetPort, targetHost, context.request().uri())
-                .putHeader(FORWARDED_HEADER, localNode.id());
+        HttpRequest.BodyPublisher publisher = body == null || body.isEmpty()
+                ? HttpRequest.BodyPublishers.noBody()
+                : HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8);
+        HttpRequest.Builder request = HttpRequest.newBuilder()
+                .uri(URI.create("http://" + targetHost + ":" + targetPort + context.request().uri()))
+                .version(HttpClient.Version.HTTP_1_1)
+                .timeout(Duration.ofSeconds(10))
+                .method(context.request().method().name(), publisher)
+                .header(FORWARDED_HEADER, localNode.id());
         context.request().headers().forEach(header -> {
             if (!skipForwardHeader(header.getKey())) {
-                request.putHeader(header.getKey(), header.getValue());
+                request.header(header.getKey(), header.getValue());
             }
         });
-        extraHeaders.forEach(request::putHeader);
-        request.sendBuffer(buffer)
-                .onSuccess(response -> {
+        extraHeaders.forEach(request::header);
+        log.debug("forward request node={} target={} address={}:{} uri={} extraHeaders={}",
+                localNode.id(), targetNodeId, targetHost, targetPort, context.request().uri(), extraHeaders.keySet());
+        forwardingClient.sendAsync(request.build(), HttpResponse.BodyHandlers.ofByteArray())
+                .orTimeout(10, TimeUnit.SECONDS)
+                .whenComplete((response, throwable) -> runOnRequestContext(requestContext, () -> {
+                    if (throwable != null) {
+                        Throwable cause = throwable.getCause() == null ? throwable : throwable.getCause();
+                        Exception exception = cause instanceof Exception e ? e : new RuntimeException(cause);
+                        log.warn("forward failed node={} target={} address={}:{} uri={}",
+                                localNode.id(), targetNodeId, targetHost, targetPort, context.request().uri(), exception);
+                        error(context, 502, new IOException(
+                                "failed to forward request to node " + targetNodeId + " at "
+                                        + targetHost + ":" + targetPort + ": " + exception.getMessage(),
+                                exception
+                        ));
+                        return;
+                    }
+                    log.debug("forward response node={} target={} uri={} status={}",
+                            localNode.id(), targetNodeId, context.request().uri(), response.statusCode());
                     context.response().setStatusCode(response.statusCode());
-                    response.headers().forEach(header -> {
-                        if (!skipForwardHeader(header.getKey())) {
-                            context.response().putHeader(header.getKey(), header.getValue());
+                    response.headers().map().forEach((name, values) -> {
+                        if (!skipForwardHeader(name)) {
+                            for (String value : values) {
+                                context.response().putHeader(name, value);
+                            }
                         }
                     });
-                    Buffer responseBody = response.body();
-                    if (responseBody == null) {
+                    byte[] responseBody = response.body();
+                    if (responseBody == null || responseBody.length == 0) {
                         context.response().end();
                     } else {
-                        context.response().end(responseBody);
+                        context.response().end(Buffer.buffer(responseBody));
                     }
-                })
-                .onFailure(e -> error(context, 502, new IOException(
-                        "failed to forward request to node " + targetNodeId + " at "
-                                + targetHost + ":" + targetPort,
-                        e
-                )));
+                }));
+    }
+
+    private void runOnRequestContext(Context requestContext, Runnable task) {
+        if (requestContext == null) {
+            vertx.runOnContext(ignored -> task.run());
+            return;
+        }
+        requestContext.runOnContext(ignored -> task.run());
     }
 
     private boolean skipForwardHeader(String headerName) {
@@ -1885,10 +2424,13 @@ public class HttpApiServer implements AutoCloseable {
         return lower.equals("host")
                 || lower.equals("connection")
                 || lower.equals("content-length")
+                || lower.equals("expect")
+                || lower.equals("upgrade")
                 || lower.equals("transfer-encoding")
                 || lower.equals(FORWARDED_HEADER)
                 || lower.equals(OWNER_TERM_HEADER)
-                || lower.equals(ALLOCATION_EPOCH_HEADER);
+                || lower.equals(ALLOCATION_EPOCH_HEADER)
+                || lower.equals(DOCUMENT_ID_HEADER);
     }
 
     private Set<NodeRole> ensureCoordinatingRole(Set<NodeRole> roles) {
@@ -1932,6 +2474,70 @@ public class HttpApiServer implements AutoCloseable {
         return throwable instanceof Exception exception ? exception : new RuntimeException(throwable);
     }
 
+    private record BulkItemRequest(
+            String action,
+            String index,
+            String id,
+            String routing,
+            Map<String, Object> source
+    ) {
+    }
+
+    private record BulkItemPlan(
+            int ordinal,
+            BulkItemRequest item,
+            String id,
+            WriteRoute route,
+            Map<String, FieldMapping> mappings
+    ) {
+    }
+
+    private record BulkItemResult(int ordinal, BulkItemResponse response) {
+    }
+
+    private record BulkShardBatchKey(
+            String nodeId,
+            String host,
+            int httpPort,
+            ShardId shardId,
+            long ownerTerm,
+            long allocationEpoch
+    ) {
+    }
+
+    private record BulkItemResponse(
+            String action,
+            String index,
+            String id,
+            int status,
+            String result,
+            Object shardId,
+            Map<String, Object> error
+    ) {
+        private boolean failed() {
+            return error != null || status >= 300;
+        }
+
+        private Map<String, Object> asMap() {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("_index", index);
+            if (id != null) {
+                item.put("_id", id);
+            }
+            item.put("status", status);
+            if (result != null) {
+                item.put("result", result);
+            }
+            if (shardId != null) {
+                item.put("shardId", shardId);
+            }
+            if (error != null) {
+                item.put("error", error);
+            }
+            return Map.of(action, item);
+        }
+    }
+
     private record ShardPit(SearchShardTarget target, String pitId) {
     }
 
@@ -1941,6 +2547,9 @@ public class HttpApiServer implements AutoCloseable {
             Map<String, String> shardPitIds,
             Instant expiresAt
     ) {
+    }
+
+    private record RemoteHttpResponse(int statusCode, String body) {
     }
 
     @Override

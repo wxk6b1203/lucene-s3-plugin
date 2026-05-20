@@ -126,6 +126,23 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
     }
 
     @Override
+    public void deleteByStatus(String indexName, List<IndexFileStatus> statuses) {
+        try {
+            var response = client.getKVClient()
+                    .get(filePrefix(indexName), GetOption.builder().isPrefix(true).build())
+                    .get();
+            for (KeyValue item : response.getKvs()) {
+                IndexFileMetadata metadata = decodeFileMetadata(item);
+                if (statuses.contains(metadata.getStatus())) {
+                    deleteIfCurrent(item);
+                }
+            }
+        } catch (Exception e) {
+            throw storageException("Failed to delete file metadata by status: " + indexName, e);
+        }
+    }
+
+    @Override
     public void deleteAll(String indexName) {
         try {
             client.getKVClient()
@@ -149,6 +166,17 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
                 .txn()
                 .If(cmp)
                 .Then(Op.put(key, ByteSequence.from(JsonUtil.writeValueAsBytes(metadata)), PutOption.DEFAULT))
+                .commit()
+                .get()
+                .isSucceeded();
+    }
+
+    private boolean deleteIfCurrent(KeyValue currentKv) throws Exception {
+        Cmp cmp = new Cmp(currentKv.getKey(), Cmp.Op.EQUAL, CmpTarget.modRevision(currentKv.getModRevision()));
+        return client.getKVClient()
+                .txn()
+                .If(cmp)
+                .Then(Op.delete(currentKv.getKey(), DeleteOption.DEFAULT))
                 .commit()
                 .get()
                 .isSucceeded();
