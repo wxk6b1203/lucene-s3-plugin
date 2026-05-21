@@ -1,6 +1,7 @@
 package com.github.wxk6b1203.store;
 
 import com.github.wxk6b1203.metadata.common.CommittingIndexFile;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.mem.MemMockProvider;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
@@ -69,6 +70,33 @@ public class ManifestManagerTest {
         assertEquals(2, remote.puts.size());
         assertTrue(remote.puts.get(0).startsWith("books/_data/_0.si."));
         assertTrue(remote.puts.get(1).startsWith("books/_data/segments_1."));
+    }
+
+    @Test
+    public void testCleanCommitPublishesSnapshotWithFileObjectKeys() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        RecordingRemoteObjectStore remote = new RecordingRemoteObjectStore();
+        ManifestManager manager = new ManifestManager(new ManifestOptions("bucket"), remote, metadata);
+        Path data = tempDir.resolve("_0.si");
+        Path segments = tempDir.resolve("segments_1");
+        Files.write(data, new byte[]{1});
+        Files.write(segments, new byte[]{2});
+
+        manager.commit(List.of(
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
+        ));
+        waitUntil(() -> metadata.latestSnapshot("books") != null);
+        manager.close();
+
+        IndexCommitSnapshot snapshot = metadata.latestSnapshot("books");
+        assertEquals(1, snapshot.getGeneration());
+        assertEquals("segments_1", snapshot.getSegmentFileName());
+        assertEquals(List.of("_0.si", "segments_1"), snapshot.getFiles().stream()
+                .map(file -> file.getName())
+                .sorted()
+                .toList());
+        assertTrue(snapshot.getFiles().stream().allMatch(file -> file.getObjectKey().startsWith("books/_data/")));
     }
 
     @Test
@@ -271,6 +299,58 @@ public class ManifestManagerTest {
                 IndexFileStatus.CLEAN,
                 IndexFileStatus.PINNED
         )).isEmpty());
+    }
+
+    @Test
+    public void testSnapshotGcRetainsLatestAndPinnedSnapshots() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        RecordingRemoteObjectStore remote = new RecordingRemoteObjectStore();
+        ManifestManager manager = new ManifestManager(new ManifestOptions("bucket"), remote, metadata);
+        Path data = tempDir.resolve("_0.si");
+        Path secondData = tempDir.resolve("_1.si");
+        Path firstSegments = tempDir.resolve("segments_1");
+        Path secondSegments = tempDir.resolve("segments_2");
+        Files.write(data, new byte[]{1});
+        Files.write(firstSegments, new byte[]{2});
+
+        manager.commit(List.of(
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", firstSegments)
+        ));
+        waitUntil(() -> metadata.latestSnapshot("books") != null);
+        long firstGeneration = metadata.latestSnapshot("books").getGeneration();
+        String firstDataObjectKey = metadata.latestSnapshot("books").getFiles().stream()
+                .filter(file -> file.getName().equals("_0.si"))
+                .findFirst()
+                .orElseThrow()
+                .getObjectKey();
+        String firstSegmentObjectKey = metadata.latestSnapshot("books").getFiles().stream()
+                .filter(file -> file.getName().equals("segments_1"))
+                .findFirst()
+                .orElseThrow()
+                .getObjectKey();
+        manager.pinSnapshot("books", firstGeneration, "pit-1", System.currentTimeMillis() + 60_000);
+
+        Files.write(secondData, new byte[]{3, 4});
+        Files.write(secondSegments, new byte[]{5});
+        manager.commit(List.of(
+                new CommittingIndexFile("books", secondData),
+                new CommittingIndexFile("books", secondSegments)
+        ));
+        waitUntil(() -> metadata.latestSnapshot("books") != null
+                && metadata.latestSnapshot("books").getGeneration() > firstGeneration);
+
+        manager.garbageCollectSnapshots("books", 1);
+        assertEquals(2, metadata.listSnapshots("books").size());
+        assertFalse(remote.deletes.contains(firstDataObjectKey));
+
+        manager.releaseSnapshotPin("books", "pit-1");
+        manager.garbageCollectSnapshots("books", 1);
+        manager.close();
+
+        assertEquals(1, metadata.listSnapshots("books").size());
+        assertTrue(remote.deletes.contains(firstSegmentObjectKey));
+        assertTrue(remote.deletes.contains(firstDataObjectKey));
     }
 
     private void waitUntil(BooleanSupplier condition) throws InterruptedException {

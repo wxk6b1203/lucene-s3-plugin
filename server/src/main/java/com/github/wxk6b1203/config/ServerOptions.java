@@ -20,7 +20,8 @@ public record ServerOptions(
         String s3Endpoint,
         boolean s3ChunkedEncoding,
         String s3AccessKey,
-        String s3SecretKey
+        String s3SecretKey,
+        int snapshotRetainLatest
 ) {
     public boolean etcdEnabled() {
         return etcdEndpoints != null && !etcdEndpoints.isBlank();

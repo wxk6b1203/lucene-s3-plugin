@@ -251,6 +251,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private PointInTimeResponse openRemotePointInTime(ShardId shardId, String indexName, Duration ttl) throws IOException {
         S3CachingDirectory directory = openShardDirectory(shardId);
         String id = UUID.randomUUID().toString();
+        directory.pinRemoteSnapshot(id, Instant.now().plus(ttl));
         try {
             DirectoryReader reader = DirectoryReader.open(directory);
             pits.put(id, new PitContext(shardId, indexName, reader, directory, Instant.now().plus(ttl)));

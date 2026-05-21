@@ -10,6 +10,12 @@ import com.github.wxk6b1203.store.directory.S3LockFactory;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import com.github.wxk6b1203.store.manifest.ManifestOptions;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.StringField;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -31,6 +37,7 @@ import java.util.zip.CRC32;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class S3CachingDirectoryTest {
@@ -41,16 +48,11 @@ public class S3CachingDirectoryTest {
     public void testCommitPublishesAfterSegmentsFile() throws IOException {
         MemMockProvider metadata = new MemMockProvider();
         try (S3CachingDirectory directory = newDirectory("test-index", metadata)) {
-            writeFile(directory, "_0.si", new byte[]{1, 2, 3});
-            directory.sync(List.of("_0.si"));
-            assertEquals(0, metadata.listAll("test-index", List.of(IndexFileStatus.DIRTY, IndexFileStatus.CLEAN)).size());
+            commitDocument(directory, "doc-1");
 
-            writeFile(directory, "segments_1", new byte[]{4});
-            directory.sync(List.of("segments_1"));
-            directory.syncMetaData();
-
-            waitForUploads(metadata, "test-index", 2);
-            assertEquals(2, metadata.listAll("test-index", List.of(IndexFileStatus.CLEAN)).size());
+            waitUntil(() -> !metadata.listAll("test-index", List.of(IndexFileStatus.CLEAN)).isEmpty()
+                    && metadata.latestSnapshot("test-index") != null);
+            assertNotNull(metadata.latestSnapshot("test-index"));
         }
     }
 
@@ -100,6 +102,39 @@ public class S3CachingDirectoryTest {
 
         try (S3CachingDirectory directory = newReadOnlyDirectory("test-index", metadata)) {
             assertArrayEquals(new String[]{"segments_1"}, directory.listAll());
+        }
+    }
+
+    @Test
+    public void testWriterCanHideDeletedRemoteSnapshotFiles() throws IOException {
+        MemMockProvider metadata = new MemMockProvider();
+        int cleanEpoch = metadata.commitFile(new IndexFile("test-index", "segments_1", 1, 0));
+        metadata.updateFileStatus("test-index", "segments_1", cleanEpoch, IndexFileStatus.UPLOADING);
+        metadata.updateFileStatus("test-index", "segments_1", cleanEpoch, IndexFileStatus.CLEAN);
+        metadata.publishSnapshot("test-index", "segments_1", List.of(metadata.fileMetadata("test-index", "segments_1")));
+
+        try (S3CachingDirectory directory = newDirectory("test-index", metadata)) {
+            assertArrayEquals(new String[]{"segments_1"}, directory.listAll());
+            directory.deleteFile("segments_1");
+
+            assertArrayEquals(new String[0], directory.listAll());
+            assertThrows(NoSuchFileException.class, () -> directory.fileLength("segments_1"));
+        }
+    }
+
+    @Test
+    public void testWriterCanHideDeletedLiveManifestFiles() throws IOException {
+        MemMockProvider metadata = new MemMockProvider();
+        int cleanEpoch = metadata.commitFile(new IndexFile("test-index", "segments_1", 1, 0));
+        metadata.updateFileStatus("test-index", "segments_1", cleanEpoch, IndexFileStatus.UPLOADING);
+        metadata.updateFileStatus("test-index", "segments_1", cleanEpoch, IndexFileStatus.CLEAN);
+
+        try (S3CachingDirectory directory = newDirectory("test-index", metadata)) {
+            assertArrayEquals(new String[]{"segments_1"}, directory.listAll());
+            directory.deleteFile("segments_1");
+
+            assertArrayEquals(new String[0], directory.listAll());
+            assertThrows(NoSuchFileException.class, () -> directory.fileLength("segments_1"));
         }
     }
 
@@ -190,6 +225,60 @@ public class S3CachingDirectoryTest {
     }
 
     @Test
+    public void testReadOnlySnapshotUsesSnapshotObjectKeyWhenLiveMetadataChanges() throws IOException {
+        MemMockProvider metadata = new MemMockProvider();
+        MapRemoteObjectStore remote = new MapRemoteObjectStore();
+        String indexName = "test-index";
+        String fileName = "_0.si";
+        byte[] oldBytes = new byte[]{1};
+        byte[] newBytes = new byte[]{2};
+        String oldObjectKey = indexName + "/_data/" + fileName + ".old";
+        String newObjectKey = indexName + "/_data/" + fileName + ".new";
+        remote.putObject(oldObjectKey, oldBytes);
+        remote.putObject(newObjectKey, newBytes);
+
+        int oldEpoch = metadata.commitFile(new IndexFile(
+                indexName,
+                fileName,
+                "_data",
+                oldObjectKey,
+                oldBytes.length,
+                crc32(oldBytes),
+                System.currentTimeMillis()
+        ));
+        metadata.updateFileStatus(indexName, fileName, oldEpoch, IndexFileStatus.UPLOADING);
+        metadata.updateFileStatus(indexName, fileName, oldEpoch, IndexFileStatus.CLEAN);
+        metadata.publishSnapshot(indexName, "segments_1", List.of(metadata.fileMetadata(indexName, fileName)));
+
+        int newEpoch = metadata.commitFile(new IndexFile(
+                indexName,
+                fileName,
+                "_data",
+                newObjectKey,
+                newBytes.length,
+                crc32(newBytes),
+                System.currentTimeMillis()
+        ));
+        metadata.updateFileStatus(indexName, fileName, newEpoch, IndexFileStatus.UPLOADING);
+        metadata.updateFileStatus(indexName, fileName, newEpoch, IndexFileStatus.CLEAN);
+
+        ManifestManager manager = new ManifestManager(new ManifestOptions("test-bucket"), remote, metadata);
+        try (S3CachingDirectory directory = new S3CachingDirectory(
+                new S3DirectoryOptions(tempDir, indexName),
+                new S3LockFactory(),
+                manager,
+                List.of(IndexFileStatus.CLEAN, IndexFileStatus.PINNED),
+                false
+        )) {
+            byte[] actual = new byte[1];
+            try (IndexInput input = directory.openInput(fileName, IOContext.DEFAULT)) {
+                input.readBytes(actual, 0, actual.length);
+            }
+            assertArrayEquals(oldBytes, actual);
+        }
+    }
+
+    @Test
     public void testPublishLocalCommitRetriesFailedUploadWithoutNewCommit() throws IOException {
         MemMockProvider metadata = new MemMockProvider();
         FailingRemoteObjectStore remote = new FailingRemoteObjectStore("_0.si");
@@ -199,14 +288,10 @@ public class S3CachingDirectoryTest {
                 new S3LockFactory(),
                 manager
         )) {
-            writeFile(directory, "_0.si", new byte[]{1});
-            directory.sync(List.of("_0.si"));
-            writeFile(directory, "segments_1", new byte[]{2});
-            directory.sync(List.of("segments_1"));
-            directory.syncMetaData();
+            commitDocument(directory, "doc-1");
 
-            waitUntil(() -> metadata.fileMetadata("test-index", "_0.si") != null
-                    && metadata.fileMetadata("test-index", "_0.si").getStatus() == IndexFileStatus.UPLOADING);
+            waitUntil(() -> metadata.listAll("test-index", List.of(IndexFileStatus.UPLOADING)).stream()
+                    .anyMatch(file -> !file.getName().startsWith("segments_")));
 
             remote.failName(null);
             waitUntil(() -> {
@@ -218,6 +303,15 @@ public class S3CachingDirectoryTest {
                 }
             });
             assertEquals(2, metadata.listAll("test-index", List.of(IndexFileStatus.CLEAN)).size());
+        }
+    }
+
+    private void commitDocument(S3CachingDirectory directory, String id) throws IOException {
+        try (IndexWriter writer = new IndexWriter(directory, new IndexWriterConfig(new StandardAnalyzer()))) {
+            Document document = new Document();
+            document.add(new StringField("_id", id, Field.Store.YES));
+            writer.addDocument(document);
+            writer.commit();
         }
     }
 

@@ -37,6 +37,7 @@ import com.github.wxk6b1203.search.SearchShardTarget;
 import com.github.wxk6b1203.search.SearchHit;
 import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.errors.NotMasterException;
+import com.github.wxk6b1203.errors.StorageException;
 import com.github.wxk6b1203.index.IndexDocumentRequest;
 import com.github.wxk6b1203.index.IndexDocumentResponse;
 import com.github.wxk6b1203.index.LocalShardIndexService;
@@ -64,12 +65,15 @@ import io.etcd.jetcd.Client;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -82,11 +86,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.exception.SdkServiceException;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -116,6 +124,7 @@ public class HttpApiServer implements AutoCloseable {
     private final HttpClient forwardingClient;
     private final ManifestMetadataManager manifestMetadataManager;
     private final RemoteObjectStore remoteObjectStore;
+    private final int snapshotRetainLatest;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
     private final Set<String> lifecycleDeletesInProgress = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean maintenanceRunning = new AtomicBoolean();
@@ -140,7 +149,8 @@ public class HttpApiServer implements AutoCloseable {
                 null,
                 false,
                 null,
-                null
+                null,
+                2
         ));
     }
 
@@ -202,6 +212,7 @@ public class HttpApiServer implements AutoCloseable {
                 : new MemMockProvider();
         Path dataPath = Path.of(options.dataPath());
         this.remoteObjectStore = remoteObjectStore(options, dataPath);
+        this.snapshotRetainLatest = Math.max(1, options.snapshotRetainLatest());
         this.localShardIndexService = new LuceneLocalShardIndexService(
                 dataPath,
                 options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
@@ -2267,6 +2278,7 @@ public class HttpApiServer implements AutoCloseable {
         try {
             cleanupExpiredPits();
             retryOwnedShardUploads();
+            runSnapshotGarbageCollection();
             runLifecyclePolicies();
         } finally {
             maintenanceRunning.set(false);
@@ -2303,6 +2315,35 @@ public class HttpApiServer implements AutoCloseable {
             localShardIndexService.retryPendingUploads(shardIds);
         } catch (Exception e) {
             log.warn("failed to retry pending shard uploads", e);
+        }
+    }
+
+    void runSnapshotGarbageCollection() {
+        if (!clusterCoordinator.isMaster()) {
+            return;
+        }
+        ClusterState state;
+        try {
+            state = clusterStateRepository.current();
+        } catch (IOException e) {
+            log.warn("failed to load cluster state for snapshot garbage collection", e);
+            return;
+        }
+        try (ManifestManager manifestManager = new ManifestManager(
+                new ManifestOptions(""),
+                remoteObjectStore,
+                manifestMetadataManager
+        )) {
+            state.indices().forEach((indexName, settings) -> {
+                for (int shard = 0; shard < settings.numberOfShards(); shard++) {
+                    String physicalIndexName = physicalIndexName(indexName, shard);
+                    try {
+                        manifestManager.garbageCollectSnapshots(physicalIndexName, snapshotRetainLatest);
+                    } catch (Exception e) {
+                        log.warn("failed to garbage collect snapshots for {}", physicalIndexName, e);
+                    }
+                }
+            });
         }
     }
 
@@ -2357,6 +2398,10 @@ public class HttpApiServer implements AutoCloseable {
             manifestManager.deleteIndexShards(indexName, numberOfShards);
         }
         return state;
+    }
+
+    private String physicalIndexName(String indexName, int shard) {
+        return indexName + "__shard_" + shard;
     }
 
     private void requireMaster() {
@@ -2523,25 +2568,76 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void error(RoutingContext context, int status, Exception e) {
+        Throwable cause = responseCause(e);
         context.response()
                 .setStatusCode(status)
                 .putHeader("content-type", "application/json")
                 .end(new String(JsonUtil.writeValueAsBytes(Map.of(
-                        "error", e.getMessage(),
-                        "type", e.getClass().getSimpleName(),
+                        "error", cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage(),
+                        "type", cause.getClass().getSimpleName(),
                         "status", status
                 ))));
     }
 
     private int status(Exception e) {
-        if (e instanceof NotMasterException) {
+        Throwable cause = responseCause(e);
+        if (cause instanceof NotMasterException) {
             return 503;
+        }
+        if (cause instanceof NoSuchFileException || messageContains(cause, "not found") || messageContains(cause, "expired")) {
+            return 404;
+        }
+        if (messageContains(cause, "already exists") || messageContains(cause, "conflict")) {
+            return 409;
+        }
+        if (cause instanceof StorageException || cause instanceof SdkClientException
+                || cause instanceof ConnectException || cause instanceof HttpTimeoutException) {
+            return 503;
+        }
+        if (cause instanceof SdkServiceException || messageContains(cause, "remote shard")) {
+            return 502;
+        }
+        if (cause instanceof IllegalStateException) {
+            if (messageContains(cause, "no live data node")
+                    || messageContains(cause, "node is not live")
+                    || messageContains(cause, "requires live shard owner")
+                    || messageContains(cause, "current master node is not available")) {
+                return 503;
+            }
+            if (messageContains(cause, "not current shard owner")
+                    || messageContains(cause, "shard is not writable")
+                    || messageContains(cause, "stale")
+                    || messageContains(cause, "write fence")) {
+                return 409;
+            }
+            return 500;
+        }
+        if (cause instanceof IOException) {
+            return 500;
+        }
+        if (cause instanceof IllegalArgumentException) {
+            return 400;
         }
         return 400;
     }
 
     private Exception exception(Throwable throwable) {
-        return throwable instanceof Exception exception ? exception : new RuntimeException(throwable);
+        Throwable cause = responseCause(throwable);
+        return cause instanceof Exception exception ? exception : new RuntimeException(cause);
+    }
+
+    private Throwable responseCause(Throwable throwable) {
+        Throwable current = throwable;
+        while ((current instanceof CompletionException || current instanceof ExecutionException)
+                && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+    private boolean messageContains(Throwable throwable, String token) {
+        String message = throwable.getMessage();
+        return message != null && message.toLowerCase(Locale.ROOT).contains(token);
     }
 
     private record BulkItemRequest(

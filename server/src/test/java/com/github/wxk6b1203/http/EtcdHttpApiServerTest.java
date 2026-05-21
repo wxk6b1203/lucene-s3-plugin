@@ -186,7 +186,8 @@ public class EtcdHttpApiServerTest {
                 null,
                 false,
                 null,
-                null
+                null,
+                2
         ));
         server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         ServerHandle handle = new ServerHandle(nodeId, port, server);

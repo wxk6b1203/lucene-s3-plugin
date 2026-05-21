@@ -219,6 +219,37 @@ class HttpApiServerTest {
 
     @Test
     @Timeout(60)
+    void snapshotGarbageCollectionRetainsPinnedPitAndDeletesOldUnpinnedGenerations() throws Exception {
+        startServer(1);
+        createBooksIndex();
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+        waitUntil(() -> hitIds(post("/books/_search?read_preference=strong", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200)).equals(List.of("doc-1")));
+
+        String pitId = stringValue(post("/books/_pit?keep_alive=1m&read_preference=strong", Map.of(), 200).get("id"));
+        indexBook("doc-2", "visible", 200, List.of(0.0, 1.0));
+        waitUntil(() -> hitIds(post("/books/_search?read_preference=strong", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200)).contains("doc-2"));
+        waitUntil(() -> remoteSegmentObjectCount("books", 0) >= 2);
+
+        server.runSnapshotGarbageCollection();
+        assertTrue(remoteSegmentObjectCount("books", 0) >= 2);
+
+        assertTrue((Boolean) delete("/_pit", Map.of("id", pitId), 200).get("succeeded"));
+        server.runSnapshotGarbageCollection();
+        waitUntil(() -> {
+            List<String> names = remoteSegmentObjectNames("books", 0);
+            assertEquals(1, names.size(), "remote segment objects: " + names);
+            return true;
+        });
+    }
+
+    @Test
+    @Timeout(60)
     @SuppressWarnings("unchecked")
     void createIndexDoesNotExposeShardCopySettings() throws Exception {
         startServer();
@@ -339,7 +370,31 @@ class HttpApiServerTest {
         assertEquals(true, conflict.get("errors"));
         List<Map<String, Object>> conflictItems = (List<Map<String, Object>>) conflict.get("items");
         Map<String, Object> conflictItem = (Map<String, Object>) conflictItems.getFirst().get("create");
-        assertEquals(400, ((Number) conflictItem.get("status")).intValue());
+        assertEquals(409, ((Number) conflictItem.get("status")).intValue());
+    }
+
+    @Test
+    @Timeout(60)
+    void httpErrorsUseSpecificStatusCodes() throws Exception {
+        startServer();
+
+        assertEquals(404, status("GET", "/missing/_mapping", null));
+        assertEquals(404, status("POST", "/missing/_search", Map.of(
+                "query", Map.of("match_all", Map.of())
+        )));
+
+        createBooksIndex();
+        assertEquals(409, status("PUT", "/books", Map.of("number_of_shards", 1)));
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+        assertEquals(409, status("POST", "/books/_doc/doc-1?op_type=create", Map.of(
+                "category", "visible",
+                "pages", 100,
+                "embedding", List.of(1.0, 0.0)
+        )));
+        assertEquals(400, status("POST", "/books/_search", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "sort", List.of(Map.of("unknown", Map.of()))
+        )));
     }
 
     @Test
@@ -433,6 +488,10 @@ class HttpApiServerTest {
     }
 
     private void startServer() throws Exception {
+        startServer(2);
+    }
+
+    private void startServer(int snapshotRetainLatest) throws Exception {
         port = freePort();
         server = new HttpApiServer(new ServerOptions(
                 port,
@@ -450,7 +509,8 @@ class HttpApiServerTest {
                 null,
                 false,
                 null,
-                null
+                null,
+                snapshotRetainLatest
         ));
         server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
     }
@@ -484,6 +544,27 @@ class HttpApiServerTest {
         CRC32 crc32 = new CRC32();
         crc32.update(routing.getBytes(StandardCharsets.UTF_8));
         return Math.toIntExact(Math.floorMod(crc32.getValue(), numberOfShards));
+    }
+
+    private long remoteSegmentObjectCount(String indexName, int shard) throws IOException {
+        return remoteSegmentObjectNames(indexName, shard).size();
+    }
+
+    private List<String> remoteSegmentObjectNames(String indexName, int shard) throws IOException {
+        Path dataPath = tempDir.resolve("remote-objects")
+                .resolve(indexName + "__shard_" + shard)
+                .resolve("_data");
+        if (!Files.isDirectory(dataPath)) {
+            return List.of();
+        }
+        try (var paths = Files.walk(dataPath)) {
+            return paths
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().startsWith("segments_"))
+                    .map(path -> path.getFileName().toString())
+                    .sorted()
+                    .toList();
+        }
     }
 
     private void indexBook(String id, String category, int pages, List<Double> embedding) throws Exception {

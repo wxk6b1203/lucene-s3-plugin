@@ -12,6 +12,8 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class EtcdManifestMetadataManagerTest {
     @Test
@@ -35,8 +37,18 @@ public class EtcdManifestMetadataManagerTest {
             assertEquals(IndexFileStatus.CLEAN, metadata.getStatus());
             assertEquals(1, provider.listAll("books__shard_0", List.of(IndexFileStatus.CLEAN)).size());
 
+            long generation = provider.publishSnapshot("books__shard_0", "segments_1", List.of(metadata));
+            assertEquals(generation, provider.latestSnapshot("books__shard_0").getGeneration());
+            assertEquals(1, provider.listSnapshots("books__shard_0").size());
+
+            provider.pinSnapshot("books__shard_0", generation, "pit-1", System.currentTimeMillis() - 1);
+            assertEquals(1, provider.snapshotPins("books__shard_0").size());
+            provider.deleteExpiredSnapshotPins(System.currentTimeMillis());
+            assertTrue(provider.snapshotPins("books__shard_0").isEmpty());
+
             provider.deleteAll("books__shard_0");
             assertEquals(0, provider.listAll("books__shard_0", List.of(IndexFileStatus.CLEAN)).size());
+            assertNull(provider.latestSnapshot("books__shard_0"));
         } finally {
             client.close();
         }

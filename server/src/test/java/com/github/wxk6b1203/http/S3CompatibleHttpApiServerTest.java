@@ -55,7 +55,8 @@ class S3CompatibleHttpApiServerTest {
                 System.getenv("S3_TEST_ENDPOINT"),
                 Boolean.parseBoolean(System.getenv().getOrDefault("S3_TEST_CHUNKED_ENCODING", "false")),
                 null,
-                null
+                null,
+                2
         ))) {
             server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
             put(port, "/" + indexName, Map.of(

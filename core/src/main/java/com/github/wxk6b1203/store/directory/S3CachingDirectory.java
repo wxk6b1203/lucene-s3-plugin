@@ -1,12 +1,14 @@
 package com.github.wxk6b1203.store.directory;
 
 import com.github.wxk6b1203.metadata.common.CommittingIndexFile;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.store.common.FileChecksums;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -29,6 +31,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /**
  * A Directory implementation that uses S3 as the underlying storage.
@@ -45,9 +48,13 @@ public class S3CachingDirectory extends BaseDirectory {
     private final NIOFSDirectory sharedDirectory;
     private final List<IndexFileStatus> readableRemoteStatuses;
     private final boolean includeWalFiles;
+    private final IndexCommitSnapshot remoteSnapshot;
+    private final Map<String, IndexFileMetadata> remoteSnapshotFiles;
     private final Set<String> syncedFiles = new ConcurrentSkipListSet<>();
     private final Set<String> pendingLocalDeletes = new ConcurrentSkipListSet<>();
+    private final Set<String> deletedRemoteFiles = new ConcurrentSkipListSet<>();
     private final Map<String, Object> cacheLocks = new ConcurrentHashMap<>();
+    private String snapshotPinId;
 
     public S3CachingDirectory(
             S3DirectoryOptions options,
@@ -84,6 +91,8 @@ public class S3CachingDirectory extends BaseDirectory {
         this.manifestManager = manifestManager;
         this.readableRemoteStatuses = List.copyOf(readableRemoteStatuses);
         this.includeWalFiles = includeWalFiles;
+        this.remoteSnapshot = manifestManager.latestSnapshot(indexName);
+        this.remoteSnapshotFiles = snapshotFiles(remoteSnapshot);
         this.walDataPath = PathUtil.walDataPath(basePath, indexName);
         this.sharedDataPath = PathUtil.sharedDataPath(basePath, indexName);
         this.sharedTempPath = PathUtil.sharedTempPath(basePath, indexName);
@@ -101,10 +110,17 @@ public class S3CachingDirectory extends BaseDirectory {
         if (includeWalFiles) {
             names.addAll(List.of(walDirectory.listAll()));
         }
+        if (remoteSnapshot != null) {
+            remoteSnapshotFiles.keySet().stream()
+                    .filter(name -> !deletedRemoteFiles.contains(name))
+                    .forEach(names::add);
+            return names.toArray(String[]::new);
+        }
         try {
             manifestManager.listAll(indexName, readableRemoteStatuses)
                     .stream()
                     .map(IndexFileMetadata::getName)
+                    .filter(name -> !deletedRemoteFiles.contains(name))
                     .forEach(names::add);
             return names.toArray(String[]::new);
         } catch (Exception e) {
@@ -116,6 +132,9 @@ public class S3CachingDirectory extends BaseDirectory {
     public void deleteFile(String name) throws IOException {
         ensureOpen();
         syncedFiles.remove(name);
+        if (knownRemoteFile(name)) {
+            deletedRemoteFiles.add(name);
+        }
         deleteLocalIfExists(name);
     }
 
@@ -124,6 +143,16 @@ public class S3CachingDirectory extends BaseDirectory {
         ensureOpen();
         if (walFileAvailable(name)) {
             return Files.size(walDataPath.resolve(name));
+        }
+        if (deletedRemoteFiles.contains(name)) {
+            throw new NoSuchFileException(name);
+        }
+        IndexFileMetadata snapshotFile = remoteSnapshotFiles.get(name);
+        if (snapshotFile != null && sharedCacheAvailable(name)) {
+            return Files.size(sharedDataPath.resolve(name));
+        }
+        if (snapshotFile != null) {
+            return snapshotFile.getSize();
         }
         Path sharedFile = sharedDataPath.resolve(name);
         if (sharedCacheAvailable(name)) {
@@ -136,6 +165,7 @@ public class S3CachingDirectory extends BaseDirectory {
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
         ensureOpen();
+        deletedRemoteFiles.remove(name);
         return walDirectory.createOutput(name, context);
     }
 
@@ -172,36 +202,49 @@ public class S3CachingDirectory extends BaseDirectory {
             return;
         }
         Set<String> publishCandidates = new HashSet<>(syncedFiles);
-        publishCandidates.addAll(List.of(walDirectory.listAll()));
+        publishCandidates.addAll(List.of(listAll()));
         publishLocalFiles(publishCandidates);
         syncedFiles.clear();
     }
 
     public void publishLocalCommit() throws IOException {
         ensureOpen();
-        List<String> localFiles = List.of(walDirectory.listAll());
-        if (localFiles.stream().noneMatch(this::isCommittedSegmentFile)) {
+        List<String> visibleFiles = List.of(listAll());
+        if (visibleFiles.stream().noneMatch(this::isCommittedSegmentFile)) {
             return;
         }
-        publishLocalFiles(localFiles);
+        publishLocalFiles(visibleFiles);
     }
 
     private void publishLocalFiles(Collection<String> publishCandidates) throws IOException {
         List<CommittingIndexFile> files = new ArrayList<>();
-        for (String name : publishCandidates) {
+        Set<String> snapshotFileNames = currentCommitFileNames(publishCandidates);
+        for (String name : snapshotFileNames) {
             if (shouldPublish(name) && shouldCommitToManifest(name) && Files.exists(walDataPath.resolve(name))) {
                 files.add(new CommittingIndexFile(indexName, walDataPath.resolve(name)));
             }
         }
         if (!files.isEmpty()) {
-            manifestManager.commit(files);
+            manifestManager.commit(files, snapshotFileNames);
         }
+    }
+
+    private Set<String> currentCommitFileNames(Collection<String> publishCandidates) throws IOException {
+        if (publishCandidates.stream().noneMatch(this::isCommittedSegmentFile)) {
+            return Set.of();
+        }
+        return SegmentInfos.readLatestCommit(this)
+                .files(true)
+                .stream()
+                .filter(this::shouldPublish)
+                .collect(Collectors.toCollection(HashSet::new));
     }
 
     @Override
     public void rename(String source, String dest) throws IOException {
         ensureOpen();
         walDirectory.rename(source, dest);
+        deletedRemoteFiles.remove(dest);
         if (syncedFiles.remove(source) || isCommittedSegmentFile(dest)) {
             syncedFiles.add(dest);
         }
@@ -236,6 +279,11 @@ public class S3CachingDirectory extends BaseDirectory {
             failure = e instanceof IOException ioException ? ioException : new IOException(e);
         }
         try {
+            releaseSnapshotPin();
+        } catch (Exception e) {
+            failure = addFailure(failure, e instanceof IOException ioException ? ioException : new IOException(e));
+        }
+        try {
             walDirectory.close();
         } catch (IOException e) {
             if (failure == null) {
@@ -265,6 +313,20 @@ public class S3CachingDirectory extends BaseDirectory {
         if (failure != null) {
             throw failure;
         }
+    }
+
+    public Long remoteSnapshotGeneration() {
+        return remoteSnapshot == null ? null : remoteSnapshot.getGeneration();
+    }
+
+    public void pinRemoteSnapshot(String pinId, java.time.Instant expiresAt) {
+        ensureOpen();
+        if (remoteSnapshot == null || pinId == null || pinId.isBlank()) {
+            return;
+        }
+        releaseSnapshotPin();
+        this.snapshotPinId = pinId;
+        manifestManager.pinSnapshot(indexName, remoteSnapshot.getGeneration(), pinId, expiresAt.toEpochMilli());
     }
 
     @Override
@@ -304,6 +366,16 @@ public class S3CachingDirectory extends BaseDirectory {
     }
 
     private IndexFileMetadata readableRemoteFileMetadata(String name) throws IOException {
+        if (deletedRemoteFiles.contains(name)) {
+            throw new java.nio.file.NoSuchFileException(name);
+        }
+        IndexFileMetadata snapshotFile = remoteSnapshotFiles.get(name);
+        if (snapshotFile != null) {
+            return snapshotFile;
+        }
+        if (remoteSnapshot != null) {
+            throw new java.nio.file.NoSuchFileException(name);
+        }
         IndexFileMetadata metadata = manifestManager.fileMetadata(indexName, name);
         if (!readableRemoteStatuses.contains(metadata.getStatus())) {
             throw new java.nio.file.NoSuchFileException(name);
@@ -342,6 +414,44 @@ public class S3CachingDirectory extends BaseDirectory {
             return false;
         }
         return metadata.getChecksum() == 0 || FileChecksums.crc32(sharedFile) == metadata.getChecksum();
+    }
+
+    private Map<String, IndexFileMetadata> snapshotFiles(IndexCommitSnapshot snapshot) {
+        if (snapshot == null || snapshot.getFiles() == null || snapshot.getFiles().isEmpty()) {
+            return Map.of();
+        }
+        Map<String, IndexFileMetadata> files = new ConcurrentHashMap<>();
+        for (IndexFileMetadata file : snapshot.getFiles()) {
+            files.put(file.getName(), file);
+        }
+        return files;
+    }
+
+    private boolean knownRemoteFile(String name) throws IOException {
+        if (remoteSnapshotFiles.containsKey(name)) {
+            return true;
+        }
+        try {
+            manifestManager.fileMetadata(indexName, name);
+            return true;
+        } catch (NoSuchFileException e) {
+            return false;
+        }
+    }
+
+    private void releaseSnapshotPin() {
+        if (snapshotPinId != null && remoteSnapshot != null) {
+            manifestManager.releaseSnapshotPin(indexName, snapshotPinId);
+            snapshotPinId = null;
+        }
+    }
+
+    private IOException addFailure(IOException failure, IOException next) {
+        if (failure == null) {
+            return next;
+        }
+        failure.addSuppressed(next);
+        return failure;
     }
 
     private void deleteLocalIfExists(String name) throws IOException {

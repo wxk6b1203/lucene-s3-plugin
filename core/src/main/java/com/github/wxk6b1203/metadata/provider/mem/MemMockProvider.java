@@ -1,17 +1,23 @@
 package com.github.wxk6b1203.metadata.provider.mem;
 
 import com.github.wxk6b1203.metadata.common.IndexFile;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshotPin;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 public class MemMockProvider extends ManifestMetadataManager {
     private final ConcurrentHashMap<String, IndexFileMetadata> files = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, IndexCommitSnapshot> snapshots = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, IndexCommitSnapshotPin> pins = new ConcurrentHashMap<>();
 
     private String keyName(IndexFile indexFile) {
         return indexFile.indexName() + "/" + indexFile.name();
@@ -69,6 +75,74 @@ public class MemMockProvider extends ManifestMetadataManager {
     }
 
     @Override
+    public synchronized long publishSnapshot(String indexName, String segmentFileName, List<IndexFileMetadata> files) {
+        long generation = listSnapshots(indexName).stream()
+                .mapToLong(IndexCommitSnapshot::getGeneration)
+                .max()
+                .orElse(0) + 1;
+        IndexCommitSnapshot snapshot = new IndexCommitSnapshot(
+                indexName,
+                generation,
+                segmentFileName,
+                copyFiles(files),
+                System.currentTimeMillis()
+        );
+        snapshots.put(snapshotKey(indexName, generation), snapshot);
+        return generation;
+    }
+
+    @Override
+    public synchronized IndexCommitSnapshot latestSnapshot(String indexName) {
+        return listSnapshots(indexName).stream()
+                .max(Comparator.comparingLong(IndexCommitSnapshot::getGeneration))
+                .orElse(null);
+    }
+
+    @Override
+    public synchronized IndexCommitSnapshot snapshot(String indexName, long generation) {
+        return snapshots.get(snapshotKey(indexName, generation));
+    }
+
+    @Override
+    public synchronized List<IndexCommitSnapshot> listSnapshots(String indexName) {
+        String prefix = indexName + "/";
+        return snapshots.entrySet().stream()
+                .filter(entry -> entry.getKey().startsWith(prefix))
+                .map(java.util.Map.Entry::getValue)
+                .sorted(Comparator.comparingLong(IndexCommitSnapshot::getGeneration))
+                .toList();
+    }
+
+    @Override
+    public synchronized void deleteSnapshot(String indexName, long generation) {
+        snapshots.remove(snapshotKey(indexName, generation));
+    }
+
+    @Override
+    public synchronized void pinSnapshot(String indexName, long generation, String pinId, long expiresAtMillis) {
+        pins.put(pinKey(indexName, pinId), new IndexCommitSnapshotPin(indexName, generation, pinId, expiresAtMillis));
+    }
+
+    @Override
+    public synchronized void releaseSnapshotPin(String indexName, String pinId) {
+        pins.remove(pinKey(indexName, pinId));
+    }
+
+    @Override
+    public synchronized List<IndexCommitSnapshotPin> snapshotPins(String indexName) {
+        String prefix = indexName + "/";
+        return pins.entrySet().stream()
+                .filter(entry -> entry.getKey().startsWith(prefix))
+                .map(java.util.Map.Entry::getValue)
+                .toList();
+    }
+
+    @Override
+    public synchronized void deleteExpiredSnapshotPins(long nowMillis) {
+        pins.entrySet().removeIf(entry -> entry.getValue().getExpiresAtMillis() <= nowMillis);
+    }
+
+    @Override
     public synchronized void deleteByStatus(String indexName, List<IndexFileStatus> statuses) {
         String prefix = indexName + "/";
         files.entrySet().removeIf(entry -> entry.getKey().startsWith(prefix)
@@ -79,5 +153,37 @@ public class MemMockProvider extends ManifestMetadataManager {
     public synchronized void deleteAll(String indexName) {
         String prefix = indexName + "/";
         files.keySet().removeIf(key -> key.startsWith(prefix));
+        snapshots.keySet().removeIf(key -> key.startsWith(prefix));
+        pins.keySet().removeIf(key -> key.startsWith(prefix));
+    }
+
+    private String snapshotKey(String indexName, long generation) {
+        return indexName + "/" + generation;
+    }
+
+    private String pinKey(String indexName, String pinId) {
+        return indexName + "/" + pinId;
+    }
+
+    private List<IndexFileMetadata> copyFiles(List<IndexFileMetadata> files) {
+        List<IndexFileMetadata> copies = new ArrayList<>(files.size());
+        for (IndexFileMetadata file : files) {
+            copies.add(copy(file));
+        }
+        return copies;
+    }
+
+    private IndexFileMetadata copy(IndexFileMetadata file) {
+        return new IndexFileMetadata(
+                file.getIndexName(),
+                file.getName(),
+                file.getDataDirectory(),
+                file.getObjectKey(),
+                file.getEpoch(),
+                file.getSize(),
+                file.getChecksum(),
+                file.getModifiedTime(),
+                file.getStatus()
+        );
     }
 }

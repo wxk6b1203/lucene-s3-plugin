@@ -45,6 +45,8 @@ class ServerConfigFileTest {
                     chunkedEncoding: true
                     accessKey: minio
                     secretKey: password
+                  snapshot:
+                    retainLatest: 3
                 """);
 
         Server command = new Server();
@@ -67,6 +69,7 @@ class ServerConfigFileTest {
         assertEquals(true, options.s3ChunkedEncoding());
         assertEquals("minio", options.s3AccessKey());
         assertEquals("password", options.s3SecretKey());
+        assertEquals(3, options.snapshotRetainLatest());
     }
 
     @Test
@@ -80,7 +83,8 @@ class ServerConfigFileTest {
                   "s3": {
                     "bucket": "json-bucket",
                     "chunkedEncoding": true
-                  }
+                  },
+                  "snapshotRetainLatest": 4
                 }
                 """);
 
@@ -98,5 +102,6 @@ class ServerConfigFileTest {
         assertEquals(Set.of(NodeRole.DATA, NodeRole.COORDINATING), options.roles());
         assertEquals("cli-bucket", options.s3Bucket());
         assertEquals(false, options.s3ChunkedEncoding());
+        assertEquals(4, options.snapshotRetainLatest());
     }
 }

@@ -2,6 +2,8 @@ package com.github.wxk6b1203.metadata.provider.etcd;
 
 import com.github.wxk6b1203.errors.StorageException;
 import com.github.wxk6b1203.metadata.common.IndexFile;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshotPin;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
@@ -20,6 +22,7 @@ import lombok.Data;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -126,6 +129,137 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
     }
 
     @Override
+    public long publishSnapshot(String indexName, String segmentFileName, List<IndexFileMetadata> files) {
+        for (int attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+            try {
+                long generation = listSnapshots(indexName).stream()
+                        .mapToLong(IndexCommitSnapshot::getGeneration)
+                        .max()
+                        .orElse(0) + 1;
+                IndexCommitSnapshot snapshot = new IndexCommitSnapshot(
+                        indexName,
+                        generation,
+                        segmentFileName,
+                        files.stream().map(this::copyFileMetadata).toList(),
+                        System.currentTimeMillis()
+                );
+                ByteSequence key = snapshotKey(indexName, generation);
+                boolean created = client.getKVClient()
+                        .txn()
+                        .If(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.version(0)))
+                        .Then(Op.put(key, ByteSequence.from(JsonUtil.writeValueAsBytes(snapshot)), PutOption.DEFAULT))
+                        .commit()
+                        .get()
+                        .isSucceeded();
+                if (created) {
+                    return generation;
+                }
+            } catch (Exception e) {
+                throw storageException("Failed to publish commit snapshot: " + indexName, e);
+            }
+        }
+        throw new StorageException("Failed to publish commit snapshot after CAS retries: " + indexName);
+    }
+
+    @Override
+    public IndexCommitSnapshot latestSnapshot(String indexName) {
+        return listSnapshots(indexName).stream()
+                .max(Comparator.comparingLong(IndexCommitSnapshot::getGeneration))
+                .orElse(null);
+    }
+
+    @Override
+    public IndexCommitSnapshot snapshot(String indexName, long generation) {
+        try {
+            var response = client.getKVClient().get(snapshotKey(indexName, generation)).get();
+            return response.getKvs().isEmpty() ? null : decodeSnapshot(response.getKvs().getFirst());
+        } catch (Exception e) {
+            throw storageException("Failed to get commit snapshot: " + indexName + "/" + generation, e);
+        }
+    }
+
+    @Override
+    public List<IndexCommitSnapshot> listSnapshots(String indexName) {
+        try {
+            var response = client.getKVClient()
+                    .get(snapshotPrefix(indexName), GetOption.builder().isPrefix(true).build())
+                    .get();
+            List<IndexCommitSnapshot> result = new ArrayList<>();
+            for (KeyValue item : response.getKvs()) {
+                result.add(decodeSnapshot(item));
+            }
+            return result.stream()
+                    .sorted(Comparator.comparingLong(IndexCommitSnapshot::getGeneration))
+                    .toList();
+        } catch (Exception e) {
+            throw storageException("Failed to list commit snapshots: " + indexName, e);
+        }
+    }
+
+    @Override
+    public void deleteSnapshot(String indexName, long generation) {
+        try {
+            client.getKVClient().delete(snapshotKey(indexName, generation)).get();
+        } catch (Exception e) {
+            throw storageException("Failed to delete commit snapshot: " + indexName + "/" + generation, e);
+        }
+    }
+
+    @Override
+    public void pinSnapshot(String indexName, long generation, String pinId, long expiresAtMillis) {
+        try {
+            IndexCommitSnapshotPin pin = new IndexCommitSnapshotPin(indexName, generation, pinId, expiresAtMillis);
+            client.getKVClient()
+                    .put(pinKey(indexName, pinId), ByteSequence.from(JsonUtil.writeValueAsBytes(pin)))
+                    .get();
+        } catch (Exception e) {
+            throw storageException("Failed to pin commit snapshot: " + indexName + "/" + generation, e);
+        }
+    }
+
+    @Override
+    public void releaseSnapshotPin(String indexName, String pinId) {
+        try {
+            client.getKVClient().delete(pinKey(indexName, pinId)).get();
+        } catch (Exception e) {
+            throw storageException("Failed to release commit snapshot pin: " + indexName + "/" + pinId, e);
+        }
+    }
+
+    @Override
+    public List<IndexCommitSnapshotPin> snapshotPins(String indexName) {
+        try {
+            var response = client.getKVClient()
+                    .get(pinPrefix(indexName), GetOption.builder().isPrefix(true).build())
+                    .get();
+            List<IndexCommitSnapshotPin> result = new ArrayList<>();
+            for (KeyValue item : response.getKvs()) {
+                result.add(decodeSnapshotPin(item));
+            }
+            return result;
+        } catch (Exception e) {
+            throw storageException("Failed to list commit snapshot pins: " + indexName, e);
+        }
+    }
+
+    @Override
+    public void deleteExpiredSnapshotPins(long nowMillis) {
+        try {
+            var response = client.getKVClient()
+                    .get(key("snapshot_pin/"), GetOption.builder().isPrefix(true).build())
+                    .get();
+            for (KeyValue item : response.getKvs()) {
+                IndexCommitSnapshotPin pin = decodeSnapshotPin(item);
+                if (pin.getExpiresAtMillis() <= nowMillis) {
+                    deleteIfCurrent(item);
+                }
+            }
+        } catch (Exception e) {
+            throw storageException("Failed to delete expired commit snapshot pins", e);
+        }
+    }
+
+    @Override
     public void deleteByStatus(String indexName, List<IndexFileStatus> statuses) {
         try {
             var response = client.getKVClient()
@@ -147,6 +281,12 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
         try {
             client.getKVClient()
                     .delete(filePrefix(indexName), DeleteOption.builder().isPrefix(true).build())
+                    .get();
+            client.getKVClient()
+                    .delete(snapshotPrefix(indexName), DeleteOption.builder().isPrefix(true).build())
+                    .get();
+            client.getKVClient()
+                    .delete(pinPrefix(indexName), DeleteOption.builder().isPrefix(true).build())
                     .get();
         } catch (Exception e) {
             throw storageException("Failed to delete file metadata: " + indexName, e);
@@ -186,12 +326,50 @@ public class EtcdManifestMetadataManager extends ManifestMetadataManager {
         return JsonUtil.readValue(kv.getValue().getBytes(), IndexFileMetadata.class);
     }
 
+    private IndexCommitSnapshot decodeSnapshot(KeyValue kv) {
+        return JsonUtil.readValue(kv.getValue().getBytes(), IndexCommitSnapshot.class);
+    }
+
+    private IndexCommitSnapshotPin decodeSnapshotPin(KeyValue kv) {
+        return JsonUtil.readValue(kv.getValue().getBytes(), IndexCommitSnapshotPin.class);
+    }
+
+    private IndexFileMetadata copyFileMetadata(IndexFileMetadata file) {
+        return new IndexFileMetadata(
+                file.getIndexName(),
+                file.getName(),
+                file.getDataDirectory(),
+                file.getObjectKey(),
+                file.getEpoch(),
+                file.getSize(),
+                file.getChecksum(),
+                file.getModifiedTime(),
+                file.getStatus()
+        );
+    }
+
     private ByteSequence filePrefix(String indexName) {
         return key("index_file/" + indexName + "/");
     }
 
     private ByteSequence fileKey(String indexName, String fileName) {
         return key("index_file/" + indexName + "/" + fileName);
+    }
+
+    private ByteSequence snapshotPrefix(String indexName) {
+        return key("snapshot/" + indexName + "/");
+    }
+
+    private ByteSequence snapshotKey(String indexName, long generation) {
+        return key("snapshot/" + indexName + "/" + String.format("%020d", generation));
+    }
+
+    private ByteSequence pinPrefix(String indexName) {
+        return key("snapshot_pin/" + indexName + "/");
+    }
+
+    private ByteSequence pinKey(String indexName, String pinId) {
+        return key("snapshot_pin/" + indexName + "/" + pinId);
     }
 
     private ByteSequence key(String suffix) {

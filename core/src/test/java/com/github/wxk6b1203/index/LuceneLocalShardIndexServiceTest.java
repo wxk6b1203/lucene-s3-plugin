@@ -781,6 +781,7 @@ public class LuceneLocalShardIndexServiceTest {
                 remote
         )) {
             String pitId = service.openPointInTime(shardId, "books", Duration.ofMinutes(1), "remote").id();
+            assertEquals(1, metadata.snapshotPins("books__shard_0").size());
 
             var response = service.search(
                     shardId,
@@ -803,6 +804,7 @@ public class LuceneLocalShardIndexServiceTest {
             assertEquals(List.of("doc-1"), response.hits().stream().map(hit -> hit.id()).toList());
             assertFalse(hasFiles(PathUtil.walDataPath(readerNode, "books__shard_0")));
             assertTrue(service.closePointInTime(pitId));
+            assertTrue(metadata.snapshotPins("books__shard_0").isEmpty());
         }
     }
 

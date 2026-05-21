@@ -74,6 +74,9 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--s3-secret-key"}, description = "S3 secret key")
     private String s3SecretKey;
 
+    @CommandLine.Option(names = {"--snapshot-retain-latest"}, description = "Number of latest commit snapshot generations retained per shard")
+    private int snapshotRetainLatest = 2;
+
     @Override
     public Integer call() {
         log.info("Starting Lucene S3 Server with config file: {}", configFile);
@@ -133,7 +136,10 @@ public class Server implements Callable<Integer> {
                 optionValue("--s3-access-key", s3AccessKey, () -> config.stringValue(s3AccessKey,
                         "s3AccessKey", "s3.accessKey", "s3.access.key", "server.s3AccessKey", "server.s3.accessKey")),
                 optionValue("--s3-secret-key", s3SecretKey, () -> config.stringValue(s3SecretKey,
-                        "s3SecretKey", "s3.secretKey", "s3.secret.key", "server.s3SecretKey", "server.s3.secretKey"))
+                        "s3SecretKey", "s3.secretKey", "s3.secret.key", "server.s3SecretKey", "server.s3.secretKey")),
+                optionValue("--snapshot-retain-latest", snapshotRetainLatest, () -> config.intValue(snapshotRetainLatest,
+                        "snapshotRetainLatest", "snapshot.retainLatest", "snapshot.retain.latest",
+                        "server.snapshotRetainLatest", "server.snapshot.retainLatest", "server.snapshot.retain.latest"))
         );
     }
 

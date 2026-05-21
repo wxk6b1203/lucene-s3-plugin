@@ -1,6 +1,8 @@
 package com.github.wxk6b1203.store.manifest;
 
 import com.github.wxk6b1203.metadata.common.CommittingIndexFile;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshotPin;
 import com.github.wxk6b1203.metadata.common.IndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
@@ -19,8 +21,11 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -58,9 +63,32 @@ public class ManifestManager implements AutoCloseable {
         return fileMetadata;
     }
 
+    public IndexCommitSnapshot latestSnapshot(String indexName) {
+        return metadataManager.latestSnapshot(indexName);
+    }
+
+    public void pinSnapshot(String indexName, long generation, String pinId, long expiresAtMillis) {
+        metadataManager.pinSnapshot(indexName, generation, pinId, expiresAtMillis);
+    }
+
+    public void releaseSnapshotPin(String indexName, String pinId) {
+        metadataManager.releaseSnapshotPin(indexName, pinId);
+    }
+
     public void commit(Collection<CommittingIndexFile> indexFiles) throws IOException {
+        commit(indexFiles, List.of());
+    }
+
+    public void commit(Collection<CommittingIndexFile> indexFiles, Collection<String> snapshotFileNames) throws IOException {
+        List<CommitFile> commitFiles = new ArrayList<>();
         List<PendingUpload> pendingUploads = new ArrayList<>();
+        String snapshotIndexName = null;
         for (CommittingIndexFile indexFile : indexFiles) {
+            if (snapshotIndexName == null) {
+                snapshotIndexName = indexFile.indexName();
+            } else if (!Objects.equals(snapshotIndexName, indexFile.indexName())) {
+                throw new IllegalArgumentException("snapshot commit must target a single physical index");
+            }
             long size = Files.size(indexFile.filePath());
             long checksum = FileChecksums.crc32(indexFile.filePath());
             long modifiedTime = Files.getLastModifiedTime(indexFile.filePath()).toMillis();
@@ -79,9 +107,18 @@ public class ManifestManager implements AutoCloseable {
             if (metadata != null) {
                 pendingUploads.add(new PendingUpload(indexFile.filePath(), metadata));
             }
+            IndexFileMetadata current = metadata == null
+                    ? metadataManager.fileMetadata(file.indexName(), file.name())
+                    : metadata;
+            if (current != null) {
+                commitFiles.add(new CommitFile(current.getIndexName(), current.getName()));
+            }
         }
+        SnapshotCommit snapshotCommit = snapshotCommit(snapshotIndexName, snapshotFileNames, commitFiles);
         if (!pendingUploads.isEmpty()) {
-            uploadWorkerPool.execute(() -> uploadCommit(pendingUploads));
+            uploadWorkerPool.execute(() -> uploadCommit(pendingUploads, snapshotCommit));
+        } else {
+            publishSnapshotIfClean(snapshotCommit);
         }
     }
 
@@ -106,6 +143,12 @@ public class ManifestManager implements AutoCloseable {
         Set<String> objectKeys = new LinkedHashSet<>();
         for (IndexFileMetadata file : files) {
             objectKeys.add(objectKey(file));
+        }
+        for (String indexName : indexNames) {
+            metadataManager.listSnapshots(indexName).stream()
+                    .flatMap(snapshot -> snapshot.getFiles().stream())
+                    .map(this::objectKey)
+                    .forEach(objectKeys::add);
         }
         remoteObjectStore.delete(objectKeys);
         for (String indexName : indexNames) {
@@ -133,6 +176,51 @@ public class ManifestManager implements AutoCloseable {
         metadataManager.deleteByStatus(indexName, pendingStatuses);
     }
 
+    public void garbageCollectSnapshots(String indexName, int retainLatestCount) throws IOException {
+        ensureRemoteObjectStore();
+        metadataManager.deleteExpiredSnapshotPins(System.currentTimeMillis());
+        List<IndexCommitSnapshot> snapshots = metadataManager.listSnapshots(indexName).stream()
+                .sorted(Comparator.comparingLong(IndexCommitSnapshot::getGeneration).reversed())
+                .toList();
+        if (snapshots.isEmpty()) {
+            return;
+        }
+        Set<Long> protectedGenerations = new LinkedHashSet<>();
+        snapshots.stream()
+                .limit(Math.max(1, retainLatestCount))
+                .map(IndexCommitSnapshot::getGeneration)
+                .forEach(protectedGenerations::add);
+        for (IndexCommitSnapshotPin pin : metadataManager.snapshotPins(indexName)) {
+            protectedGenerations.add(pin.getGeneration());
+        }
+
+        Set<String> protectedObjectKeys = new LinkedHashSet<>();
+        List<IndexCommitSnapshot> deleteCandidates = new ArrayList<>();
+        for (IndexCommitSnapshot snapshot : snapshots) {
+            if (protectedGenerations.contains(snapshot.getGeneration())) {
+                snapshot.getFiles().stream()
+                        .map(IndexFileMetadata::getObjectKey)
+                        .filter(key -> key != null && !key.isBlank())
+                        .forEach(protectedObjectKeys::add);
+            } else {
+                deleteCandidates.add(snapshot);
+            }
+        }
+
+        Set<String> deleteObjectKeys = new LinkedHashSet<>();
+        for (IndexCommitSnapshot snapshot : deleteCandidates) {
+            snapshot.getFiles().stream()
+                    .map(IndexFileMetadata::getObjectKey)
+                    .filter(key -> key != null && !key.isBlank())
+                    .filter(key -> !protectedObjectKeys.contains(key))
+                    .forEach(deleteObjectKeys::add);
+        }
+        remoteObjectStore.delete(deleteObjectKeys);
+        for (IndexCommitSnapshot snapshot : deleteCandidates) {
+            metadataManager.deleteSnapshot(indexName, snapshot.getGeneration());
+        }
+    }
+
     private IndexFileMetadata uploadMetadata(IndexFile file) {
         IndexFileMetadata existing = metadataManager.fileMetadata(file.indexName(), file.name());
         if (existing != null) {
@@ -158,7 +246,7 @@ public class ManifestManager implements AutoCloseable {
                 && Objects.equals(metadata.getObjectKey(), file.objectKey());
     }
 
-    private void uploadCommit(List<PendingUpload> pendingUploads) {
+    private void uploadCommit(List<PendingUpload> pendingUploads, SnapshotCommit snapshotCommit) {
         boolean dataFilesUploaded = true;
         for (PendingUpload pendingUpload : pendingUploads) {
             if (!isCommittedSegmentFile(pendingUpload.metadata().getName())) {
@@ -173,6 +261,7 @@ public class ManifestManager implements AutoCloseable {
                 upload(pendingUpload.source(), pendingUpload.metadata());
             }
         }
+        publishSnapshotIfClean(snapshotCommit);
     }
 
     private boolean upload(Path source, IndexFileMetadata metadata) {
@@ -215,6 +304,73 @@ public class ManifestManager implements AutoCloseable {
                 && current.getStatus() == status;
     }
 
+    private SnapshotCommit snapshotCommit(
+            String snapshotIndexName,
+            Collection<String> snapshotFileNames,
+            List<CommitFile> commitFiles
+    ) {
+        if (snapshotFileNames == null || snapshotFileNames.isEmpty()) {
+            String commitIndexName = snapshotIndexName;
+            if (commitIndexName == null && !commitFiles.isEmpty()) {
+                commitIndexName = commitFiles.getFirst().indexName();
+            }
+            return new SnapshotCommit(
+                    commitIndexName,
+                    commitFiles.stream()
+                            .map(CommitFile::name)
+                            .collect(LinkedHashSet::new, LinkedHashSet::add, LinkedHashSet::addAll)
+            );
+        }
+        return new SnapshotCommit(snapshotIndexName, new LinkedHashSet<>(snapshotFileNames));
+    }
+
+    private void publishSnapshotIfClean(SnapshotCommit snapshotCommit) {
+        if (snapshotCommit.indexName() == null || snapshotCommit.fileNames().isEmpty()) {
+            return;
+        }
+        Map<String, IndexFileMetadata> files = new HashMap<>();
+        String indexName = snapshotCommit.indexName();
+        for (String fileName : snapshotCommit.fileNames()) {
+            IndexFileMetadata metadata = metadataManager.fileMetadata(indexName, fileName);
+            if (metadata == null || !remoteReadable(metadata.getStatus())) {
+                return;
+            }
+            files.put(metadata.getName(), copy(metadata));
+        }
+        IndexFileMetadata segment = latestCommittedSegmentFile(files.values());
+        if (segment == null) {
+            return;
+        }
+        metadataManager.publishSnapshot(segment.getIndexName(), segment.getName(), new ArrayList<>(files.values()));
+    }
+
+    private IndexFileMetadata latestCommittedSegmentFile(Collection<IndexFileMetadata> files) {
+        return files.stream()
+                .filter(file -> isCommittedSegmentFile(file.getName()))
+                .max(Comparator
+                        .comparingLong(IndexFileMetadata::getModifiedTime)
+                        .thenComparing(IndexFileMetadata::getName))
+                .orElse(null);
+    }
+
+    private boolean remoteReadable(IndexFileStatus status) {
+        return status == IndexFileStatus.CLEAN || status == IndexFileStatus.PINNED;
+    }
+
+    private IndexFileMetadata copy(IndexFileMetadata file) {
+        return new IndexFileMetadata(
+                file.getIndexName(),
+                file.getName(),
+                file.getDataDirectory(),
+                file.getObjectKey(),
+                file.getEpoch(),
+                file.getSize(),
+                file.getChecksum(),
+                file.getModifiedTime(),
+                file.getStatus()
+        );
+    }
+
     private void ensureRemoteObjectStore() throws IOException {
         if (remoteObjectStore == null) {
             throw new IOException("remote object store is not configured");
@@ -249,6 +405,12 @@ public class ManifestManager implements AutoCloseable {
     }
 
     private record PendingUpload(Path source, IndexFileMetadata metadata) {
+    }
+
+    private record CommitFile(String indexName, String name) {
+    }
+
+    private record SnapshotCommit(String indexName, Set<String> fileNames) {
     }
 
     private record UploadKey(String objectKey, long epoch) {
