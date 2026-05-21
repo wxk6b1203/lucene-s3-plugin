@@ -410,7 +410,9 @@ class HttpApiServerTest {
                 tempDir.toString(),
                 null,
                 null,
+                "https",
                 null,
+                false,
                 null,
                 null
         ));

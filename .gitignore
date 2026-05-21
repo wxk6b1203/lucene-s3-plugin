@@ -7,6 +7,14 @@ build/
 logs/
 server/logs/
 
+# Local secret/config overrides
+.env
+.env.*
+config/local.*
+config/*.local.yaml
+config/*.local.yml
+config/*.local.json
+
 ### IntelliJ IDEA ###
 .idea/modules.xml
 .idea/jarRepositories.xml

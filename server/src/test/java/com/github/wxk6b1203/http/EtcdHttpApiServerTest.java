@@ -182,7 +182,9 @@ public class EtcdHttpApiServerTest {
                 tempDir.resolve(nodeId).toString(),
                 null,
                 null,
+                "https",
                 null,
+                false,
                 null,
                 null
         ));

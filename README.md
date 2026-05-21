@@ -191,7 +191,7 @@ Windows 使用：
 
 ## 配置参数
 
-当前配置以 CLI 参数为主。`--conf` 参数目前只会被记录到日志，尚未解析配置文件。
+服务支持通过 `--conf` 读取 YAML 或 JSON 配置文件；命令行显式传入的参数会覆盖配置文件中的同名配置。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -206,9 +206,46 @@ Windows 使用：
 | `--data-path` | `data` | 本地 WAL、共享缓存和本地 fallback 对象存储目录。 |
 | `--s3-bucket` | 空 | S3 bucket。为空时启用本地 `remote-objects` fallback。 |
 | `--s3-region` | 空 | S3 region。未指定时走 AWS SDK 默认配置。 |
-| `--s3-endpoint` | 空 | S3 兼容服务 endpoint，例如 MinIO。 |
+| `--s3-protocol` | `https` | 当 `--s3-endpoint` 未包含 scheme 时使用的协议，可选 `http` 或 `https`。若 endpoint 已写 `http://` 或 `https://`，以 endpoint 为准。 |
+| `--s3-endpoint` | 空 | S3 兼容服务 endpoint，例如 `oss-cn-shanghai.aliyuncs.com` 或 `http://127.0.0.1:9000`。 |
+| `--s3-chunked-encoding` | `false` | 是否启用 AWS SDK S3 chunked encoding。默认关闭以兼容 OSS/MinIO 等 S3-compatible 服务；需要时可用 `--s3-chunked-encoding` 打开，或用 `--no-s3-chunked-encoding` 显式关闭。 |
 | `--s3-access-key` | 空 | S3 access key。未指定时走 AWS SDK 默认凭证链。 |
 | `--s3-secret-key` | 空 | S3 secret key。未指定时走 AWS SDK 默认凭证链。 |
+
+YAML 示例：
+
+```yaml
+server:
+  http:
+    port: 9200
+  cluster:
+    name: lucene-s3
+  node:
+    id: n1
+    name: n1
+    host: 127.0.0.1
+  roles: [MASTER, DATA, COORDINATING]
+  etcd:
+    endpoints: http://127.0.0.1:2379
+    namespace: lucene-s3/cluster
+  data:
+    path: data/n1
+  s3:
+    bucket: lucene-s3-dev
+    region: us-east-1
+    protocol: http
+    endpoint: http://127.0.0.1:9000
+    chunkedEncoding: false
+    accessKey: minioadmin
+    secretKey: minioadmin
+```
+
+JSON 也支持同样的分组结构；平铺字段如 `httpPort`、`nodeId`、`s3Bucket` 也可以使用。
+真实 AK/SK 建议通过环境变量或本地私有配置传入；`config/local.*`、`config/*.local.yaml`、`config/*.local.json` 和 `.env*` 已加入 `.gitignore`。
+
+```powershell
+.\gradlew.bat :server:run --args="server --conf config/server.yaml --http-port 9201"
+```
 
 ### 日志
 
@@ -582,5 +619,5 @@ curl -X POST http://127.0.0.1:9200/books/_search_plan \
 - S3 是提交文件的持久化来源，但最新 commit 在异步上传完成前仍可能只存在于 shard owner 本地。需要读到这部分数据时使用默认 `weak`。
 - 不支持 `number_of_replicas > 0`，也没有 primary/replica failover 语义。
 - 多节点必须使用 etcd；不配置 etcd 的内存元数据模式不能跨进程共享。
-- `--conf` 目前未实现配置文件解析。
+- `--conf` 支持 YAML/JSON 配置文件；命令行参数会覆盖配置文件。
 - Windows/Linux/macOS 均通过 Java NIO Path 处理本地路径。Windows 上删除打开中的 Lucene 文件可能需要等待，代码中已经对递归删除做了重试。

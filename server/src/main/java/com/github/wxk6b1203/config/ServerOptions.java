@@ -16,7 +16,9 @@ public record ServerOptions(
         String dataPath,
         String s3Bucket,
         String s3Region,
+        String s3Protocol,
         String s3Endpoint,
+        boolean s3ChunkedEncoding,
         String s3AccessKey,
         String s3SecretKey
 ) {

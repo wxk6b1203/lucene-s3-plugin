@@ -92,6 +92,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
+import software.amazon.awssdk.services.s3.S3Configuration;
 
 @Slf4j
 public class HttpApiServer implements AutoCloseable {
@@ -135,7 +136,9 @@ public class HttpApiServer implements AutoCloseable {
                 "data",
                 null,
                 null,
+                "https",
                 null,
+                false,
                 null,
                 null
         ));
@@ -216,8 +219,11 @@ public class HttpApiServer implements AutoCloseable {
             builder.region(Region.of(options.s3Region()));
         }
         if (options.s3Endpoint() != null && !options.s3Endpoint().isBlank()) {
-            builder.endpointOverride(URI.create(options.s3Endpoint()));
+            builder.endpointOverride(s3Endpoint(options.s3Endpoint(), options.s3Protocol()));
         }
+        builder.serviceConfiguration(S3Configuration.builder()
+                .chunkedEncodingEnabled(options.s3ChunkedEncoding())
+                .build());
         if (options.s3AccessKey() != null && !options.s3AccessKey().isBlank()
                 && options.s3SecretKey() != null && !options.s3SecretKey().isBlank()) {
             builder.credentialsProvider(StaticCredentialsProvider.create(
@@ -226,6 +232,19 @@ public class HttpApiServer implements AutoCloseable {
         }
         this.s3Client = builder.build();
         return new S3RemoteObjectStore(options.s3Bucket(), s3Client);
+    }
+
+    private URI s3Endpoint(String endpoint, String protocol) {
+        String value = endpoint.trim();
+        URI uri = URI.create(value);
+        if (uri.getScheme() != null) {
+            return uri;
+        }
+        String scheme = protocol == null || protocol.isBlank() ? "https" : protocol.trim().toLowerCase(Locale.ROOT);
+        if (!scheme.equals("http") && !scheme.equals("https")) {
+            throw new IllegalArgumentException("s3 protocol must be http or https");
+        }
+        return URI.create(scheme + "://" + value);
     }
 
     public Future<HttpServer> start() {
