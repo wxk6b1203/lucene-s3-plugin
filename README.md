@@ -280,7 +280,10 @@ curl "http://127.0.0.1:9200/books/_write_route?routing=user-1"
 curl -X PUT http://127.0.0.1:9200/books \
   -H "content-type: application/json" \
   -d '{
-    "number_of_shards": 3,
+    "settings": {
+      "number_of_shards": 3,
+      "number_of_replicas": 0
+    },
     "mappings": {
       "properties": {
         "title": {"type": "text"},
@@ -297,6 +300,8 @@ curl -X PUT http://127.0.0.1:9200/books \
     }
   }'
 ```
+
+`settings.number_of_shards` 默认 `1`。`number_of_replicas` 必须省略或为 `0`；本项目没有 primary/replica 语义，已提交数据从 S3 恢复。兼容旧的顶层写法 `number_of_shards`、`number_of_replicas`，也兼容 `settings.index.number_of_shards` 这类 ES 风格嵌套/点号 key。
 
 支持的 mapping 类型：
 

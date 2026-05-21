@@ -318,14 +318,35 @@ public class HttpApiServer implements AutoCloseable {
             requireMaster();
             String index = context.pathParam("index");
             Map<String, Object> body = bodyAsMap(context);
-            int shards = intValue(body.get("number_of_shards"), 1);
-            int redundantCopies = intValue(body.get("number_of_replicas"), 0);
+            int shards = intValue(indexSetting(body,
+                    "number_of_shards",
+                    "numberOfShards",
+                    "settings.number_of_shards",
+                    "settings.numberOfShards",
+                    "settings.index.number_of_shards",
+                    "settings.index.numberOfShards"
+            ), 1);
+            int redundantCopies = intValue(indexSetting(body,
+                    "number_of_replicas",
+                    "numberOfReplicas",
+                    "settings.number_of_replicas",
+                    "settings.numberOfReplicas",
+                    "settings.index.number_of_replicas",
+                    "settings.index.numberOfReplicas"
+            ), 0);
             if (redundantCopies != 0) {
                 throw new IllegalArgumentException(
                         "extra shard copies are not supported; committed shard data is recovered from S3"
                 );
             }
-            String policy = stringValue(body.get("lifecycle_policy"));
+            String policy = stringValue(indexSetting(body,
+                    "lifecycle_policy",
+                    "lifecyclePolicy",
+                    "settings.lifecycle_policy",
+                    "settings.lifecyclePolicy",
+                    "settings.index.lifecycle.name",
+                    "settings.index.lifecycleName"
+            ));
             json(context, 200, indexService.createIndex(new IndexSettings(
                     index,
                     shards,
@@ -336,6 +357,36 @@ public class HttpApiServer implements AutoCloseable {
         } catch (Exception e) {
             error(context, status(e), e);
         }
+    }
+
+    private Object indexSetting(Map<String, Object> body, String... paths) {
+        for (String path : paths) {
+            Object value = valueAtPath(body, path);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object valueAtPath(Map<String, Object> values, String path) {
+        if (values.containsKey(path)) {
+            return values.get(path);
+        }
+        Object current = values;
+        String[] parts = path.split("\\.");
+        for (int i = 0; i < parts.length; i++) {
+            if (!(current instanceof Map<?, ?> map)) {
+                return null;
+            }
+            String remaining = String.join(".", Arrays.copyOfRange(parts, i, parts.length));
+            if (map.containsKey(remaining)) {
+                return map.get(remaining);
+            }
+            current = ((Map<String, Object>) map).get(parts[i]);
+        }
+        return current;
     }
 
     private void deleteIndex(RoutingContext context) {
