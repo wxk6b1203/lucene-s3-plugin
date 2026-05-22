@@ -21,6 +21,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 public class EtcdClusterStateRepository implements ClusterStateRepository {
     private static final int MAX_CAS_RETRIES = 32;
@@ -28,6 +30,7 @@ public class EtcdClusterStateRepository implements ClusterStateRepository {
     private final Client client;
     private final String namespace;
     private final String clusterName;
+    private final long operationTimeoutSeconds;
 
     @Data
     @Builder
@@ -37,6 +40,8 @@ public class EtcdClusterStateRepository implements ClusterStateRepository {
         private String namespace = "lucene-s3/cluster";
         @Builder.Default
         private String clusterName = "lucene-s3";
+        @Builder.Default
+        private long operationTimeoutSeconds = 10;
     }
 
     public EtcdClusterStateRepository(Options options) {
@@ -47,6 +52,7 @@ public class EtcdClusterStateRepository implements ClusterStateRepository {
         this.client = client;
         this.namespace = normalize(options.namespace);
         this.clusterName = options.clusterName;
+        this.operationTimeoutSeconds = Math.max(1, options.operationTimeoutSeconds);
     }
 
     @Override
@@ -76,11 +82,10 @@ public class EtcdClusterStateRepository implements ClusterStateRepository {
                 Cmp cmp = currentKv == null
                         ? new Cmp(stateKey, Cmp.Op.EQUAL, CmpTarget.version(0))
                         : new Cmp(stateKey, Cmp.Op.EQUAL, CmpTarget.modRevision(currentKv.getModRevision()));
-                var response = client.getKVClient().txn()
+                var response = await(client.getKVClient().txn()
                         .If(cmp)
                         .Then(Op.put(stateKey, ByteSequence.from(JsonUtil.writeValueAsBytes(next)), io.etcd.jetcd.options.PutOption.DEFAULT))
-                        .commit()
-                        .get();
+                        .commit());
                 if (response.isSucceeded()) {
                     return next;
                 }
@@ -101,11 +106,11 @@ public class EtcdClusterStateRepository implements ClusterStateRepository {
 
     public void putNode(ClusterNode node, long leaseId) throws IOException {
         try {
-            client.getKVClient().put(
+            await(client.getKVClient().put(
                     nodeKey(node.id()),
                     ByteSequence.from(JsonUtil.writeValueAsBytes(node)),
                     io.etcd.jetcd.options.PutOption.builder().withLeaseId(leaseId).build()
-            ).get();
+            ));
         } catch (Exception e) {
             throw ioException("failed to put node heartbeat", e);
         }
@@ -113,9 +118,8 @@ public class EtcdClusterStateRepository implements ClusterStateRepository {
 
     private ClusterState mergeLiveNodes(ClusterState state) throws Exception {
         Map<String, ClusterNode> nodes = new HashMap<>();
-        var response = client.getKVClient()
-                .get(nodesPrefix(), GetOption.builder().isPrefix(true).build())
-                .get();
+        var response = await(client.getKVClient()
+                .get(nodesPrefix(), GetOption.builder().isPrefix(true).build()));
         for (KeyValue kv : response.getKvs()) {
             ClusterNode node = JsonUtil.readValue(kv.getValue().getBytes(), ClusterNode.class);
             nodes.put(node.id(), node);
@@ -133,8 +137,12 @@ public class EtcdClusterStateRepository implements ClusterStateRepository {
     }
 
     private KeyValue stateKv() throws Exception {
-        var response = client.getKVClient().get(key("state")).get();
+        var response = await(client.getKVClient().get(key("state")));
         return response.getKvs().isEmpty() ? null : response.getKvs().getFirst();
+    }
+
+    private <T> T await(CompletableFuture<T> future) throws Exception {
+        return future.get(operationTimeoutSeconds, TimeUnit.SECONDS);
     }
 
     private ClusterState decodeState(KeyValue kv) {

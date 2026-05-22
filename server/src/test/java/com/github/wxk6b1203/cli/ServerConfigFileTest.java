@@ -35,6 +35,7 @@ class ServerConfigFileTest {
                   etcd:
                     endpoints: http://127.0.0.1:2379
                     namespace: yaml/ns
+                    timeoutSeconds: 7
                   data:
                     path: data/yaml-node
                   s3:
@@ -61,6 +62,7 @@ class ServerConfigFileTest {
         assertEquals(Set.of(NodeRole.MASTER, NodeRole.DATA), options.roles());
         assertEquals("http://127.0.0.1:2379", options.etcdEndpoints());
         assertEquals("yaml/ns", options.etcdNamespace());
+        assertEquals(7, options.etcdTimeoutSeconds());
         assertEquals("data/yaml-node", options.dataPath());
         assertEquals("yaml-bucket", options.s3Bucket());
         assertEquals("us-east-1", options.s3Region());
@@ -93,7 +95,8 @@ class ServerConfigFileTest {
                 "--conf", config.toString(),
                 "-p", "9400",
                 "--s3-bucket", "cli-bucket",
-                "--no-s3-chunked-encoding"
+                "--no-s3-chunked-encoding",
+                "--etcd-timeout", "6"
         );
         ServerOptions options = command.options();
 
@@ -103,5 +106,6 @@ class ServerConfigFileTest {
         assertEquals("cli-bucket", options.s3Bucket());
         assertEquals(false, options.s3ChunkedEncoding());
         assertEquals(4, options.snapshotRetainLatest());
+        assertEquals(6, options.etcdTimeoutSeconds());
     }
 }

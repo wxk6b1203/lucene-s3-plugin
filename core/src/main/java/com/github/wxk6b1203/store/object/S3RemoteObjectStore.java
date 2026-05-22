@@ -3,6 +3,7 @@ package com.github.wxk6b1203.store.object;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -11,6 +12,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
+import java.util.stream.Collectors;
 
 public class S3RemoteObjectStore implements RemoteObjectStore {
     private final String bucket;
@@ -41,7 +43,7 @@ public class S3RemoteObjectStore implements RemoteObjectStore {
     }
 
     @Override
-    public void delete(Collection<String> keys) {
+    public void delete(Collection<String> keys) throws IOException {
         if (keys.isEmpty()) {
             return;
         }
@@ -51,6 +53,13 @@ public class S3RemoteObjectStore implements RemoteObjectStore {
                         .map(key -> ObjectIdentifier.builder().key(key).build())
                         .toList()))
                 .build();
-        s3Client.deleteObjects(request);
+        DeleteObjectsResponse response = s3Client.deleteObjects(request);
+        if (response.hasErrors()) {
+            String errors = response.errors().stream()
+                    .limit(5)
+                    .map(error -> error.key() + "=" + error.code() + ":" + error.message())
+                    .collect(Collectors.joining(", "));
+            throw new IOException("Failed to delete S3 objects from bucket " + bucket + ": " + errors);
+        }
     }
 }

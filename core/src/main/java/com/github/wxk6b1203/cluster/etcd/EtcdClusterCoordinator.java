@@ -19,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +34,7 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
     private final String namespace;
     private final long heartbeatTtlSeconds;
     private final long masterTtlSeconds;
+    private final long operationTimeoutSeconds;
     private final boolean masterEligible;
     private final ShardAllocator shardAllocator;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
@@ -51,6 +53,8 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
         private long heartbeatTtlSeconds = 10;
         @Builder.Default
         private long masterTtlSeconds = 10;
+        @Builder.Default
+        private long operationTimeoutSeconds = 10;
     }
 
     public EtcdClusterCoordinator(
@@ -67,6 +71,7 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
         this.namespace = normalize(options.namespace);
         this.heartbeatTtlSeconds = options.heartbeatTtlSeconds;
         this.masterTtlSeconds = options.masterTtlSeconds;
+        this.operationTimeoutSeconds = Math.max(1, options.operationTimeoutSeconds);
         this.masterEligible = localNode.roles().contains(NodeRole.MASTER);
         this.shardAllocator = new BalancedShardAllocator();
     }
@@ -74,9 +79,9 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
     @Override
     public void start() throws IOException {
         try {
-            this.nodeLeaseId = client.getLeaseClient().grant(heartbeatTtlSeconds).get().getID();
+            this.nodeLeaseId = await(client.getLeaseClient().grant(heartbeatTtlSeconds)).getID();
             if (masterEligible) {
-                this.masterLeaseId = client.getLeaseClient().grant(masterTtlSeconds).get().getID();
+                this.masterLeaseId = await(client.getLeaseClient().grant(masterTtlSeconds)).getID();
             }
             heartbeat();
             if (masterEligible) {
@@ -120,22 +125,21 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
     }
 
     private void heartbeat() throws Exception {
-        client.getLeaseClient().keepAliveOnce(nodeLeaseId).get();
+        await(client.getLeaseClient().keepAliveOnce(nodeLeaseId));
         repository.putNode(touch(localNode), nodeLeaseId);
     }
 
     private void campaignMaster() throws Exception {
         try {
-            client.getLeaseClient().keepAliveOnce(masterLeaseId).get();
+            await(client.getLeaseClient().keepAliveOnce(masterLeaseId));
             ByteSequence masterKey = key("master");
             ByteSequence value = ByteSequence.from(localNode.id().getBytes(StandardCharsets.UTF_8));
             PutOption putOption = PutOption.builder().withLeaseId(masterLeaseId).build();
-            var response = client.getKVClient().txn()
+            var response = await(client.getKVClient().txn()
                     .If(new Cmp(masterKey, Cmp.Op.EQUAL, CmpTarget.version(0)))
                     .Then(Op.put(masterKey, value, putOption))
                     .Else(Op.get(masterKey, io.etcd.jetcd.options.GetOption.DEFAULT))
-                    .commit()
-                    .get();
+                    .commit());
             boolean won = response.isSucceeded();
             boolean stillMaster = won;
             if (!won && !response.getGetResponses().isEmpty() && !response.getGetResponses().getFirst().getKvs().isEmpty()) {
@@ -175,6 +179,10 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
         IOException exception = new IOException(message + ": " + cause.getMessage());
         exception.initCause(cause);
         return exception;
+    }
+
+    private <T> T await(CompletableFuture<T> future) throws Exception {
+        return future.get(operationTimeoutSeconds, TimeUnit.SECONDS);
     }
 
     @Override

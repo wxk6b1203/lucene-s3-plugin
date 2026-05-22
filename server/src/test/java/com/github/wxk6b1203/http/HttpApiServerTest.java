@@ -31,6 +31,7 @@ import java.util.zip.CRC32;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -246,6 +247,64 @@ class HttpApiServerTest {
             assertEquals(1, names.size(), "remote segment objects: " + names);
             return true;
         });
+    }
+
+    @Test
+    @Timeout(60)
+    @SuppressWarnings("unchecked")
+    void uploadStatusReportsShardSnapshotAndManualRetry() throws Exception {
+        startServer();
+        createBooksIndex();
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+
+        waitUntil(() -> {
+            Map<String, Object> status = get("/books/_uploads", 200);
+            Map<String, Object> summary = (Map<String, Object>) status.get("summary");
+            return ((Number) summary.get("pending_files")).intValue() == 0;
+        });
+
+        Map<String, Object> status = get("/books/_uploads", 200);
+        Map<String, Object> summary = (Map<String, Object>) status.get("summary");
+        assertEquals(0, ((Number) summary.get("pending_files")).intValue());
+        List<Map<String, Object>> indices = (List<Map<String, Object>>) status.get("indices");
+        List<Map<String, Object>> shards = (List<Map<String, Object>>) indices.getFirst().get("shards");
+        Map<String, Object> shard = shards.getFirst();
+        assertTrue((Boolean) shard.get("remote_snapshot_ready"));
+        assertTrue(((Number) shard.get("latest_snapshot_generation")).longValue() > 0);
+
+        Map<String, Object> retry = post("/books/_uploads/_retry", Map.of(), 200);
+        Map<String, Object> retrySummary = (Map<String, Object>) retry.get("summary");
+        assertEquals(0, ((Number) retrySummary.get("pending_files")).intValue());
+    }
+
+    @Test
+    @Timeout(15)
+    void startFailsWhenEtcdIsUnavailableBeyondTimeout() throws Exception {
+        int unavailableEtcdPort = freePort();
+        port = freePort();
+        server = new HttpApiServer(new ServerOptions(
+                port,
+                "test-cluster",
+                "node-1",
+                "node-1",
+                "127.0.0.1",
+                Set.of(NodeRole.MASTER, NodeRole.DATA, NodeRole.COORDINATING),
+                "http://127.0.0.1:" + unavailableEtcdPort,
+                "test/ns/unavailable",
+                tempDir.toString(),
+                null,
+                null,
+                "https",
+                null,
+                false,
+                null,
+                null,
+                2,
+                1
+        ));
+
+        assertThrows(Exception.class, () ->
+                server.start().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS));
     }
 
     @Test

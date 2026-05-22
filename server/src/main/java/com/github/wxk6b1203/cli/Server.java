@@ -50,6 +50,9 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--etcd-namespace"}, description = "ETCD namespace for cluster state")
     private String etcdNamespace = "lucene-s3/cluster";
 
+    @CommandLine.Option(names = {"--etcd-timeout"}, description = "ETCD operation timeout in seconds for startup and metadata requests")
+    private int etcdTimeoutSeconds = 10;
+
     @CommandLine.Option(names = {"--data-path"}, description = "Local data/cache path")
     private String dataPath = "data";
 
@@ -139,7 +142,10 @@ public class Server implements Callable<Integer> {
                         "s3SecretKey", "s3.secretKey", "s3.secret.key", "server.s3SecretKey", "server.s3.secretKey")),
                 optionValue("--snapshot-retain-latest", snapshotRetainLatest, () -> config.intValue(snapshotRetainLatest,
                         "snapshotRetainLatest", "snapshot.retainLatest", "snapshot.retain.latest",
-                        "server.snapshotRetainLatest", "server.snapshot.retainLatest", "server.snapshot.retain.latest"))
+                        "server.snapshotRetainLatest", "server.snapshot.retainLatest", "server.snapshot.retain.latest")),
+                optionValue("--etcd-timeout", etcdTimeoutSeconds, () -> config.intValue(etcdTimeoutSeconds,
+                        "etcdTimeoutSeconds", "etcd.timeoutSeconds", "etcd.timeout.seconds",
+                        "server.etcdTimeoutSeconds", "server.etcd.timeoutSeconds", "server.etcd.timeout.seconds"))
         );
     }
 

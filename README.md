@@ -205,6 +205,7 @@ Windows 使用：
 | `--roles` | `MASTER,DATA,COORDINATING` | 逗号分隔角色，可选 `MASTER`,`DATA`,`INGEST`,`COORDINATING`。服务会自动补充 coordinating 能力。 |
 | `--etcd-endpoints` | 空 | etcd endpoint，例如 `http://127.0.0.1:2379`。为空时使用单节点内存元数据。 |
 | `--etcd-namespace` | `lucene-s3/cluster` | etcd 中保存集群状态和 manifest 元数据的 namespace。 |
+| `--etcd-timeout` | `10` | etcd 启动和元数据操作超时时间，单位秒。启动阶段超过该时间会失败退出。 |
 | `--data-path` | `data` | 本地 WAL、共享缓存和本地 fallback 对象存储目录。 |
 | `--s3-bucket` | 空 | S3 bucket。为空时启用本地 `remote-objects` fallback。 |
 | `--s3-region` | 空 | S3 region。未指定时走 AWS SDK 默认配置。 |
@@ -231,6 +232,7 @@ server:
   etcd:
     endpoints: http://127.0.0.1:2379
     namespace: lucene-s3/cluster
+    timeoutSeconds: 10
   data:
     path: data/n1
   s3:
@@ -550,6 +552,26 @@ curl -X POST http://127.0.0.1:9200/books/_delete_by_query \
 ```
 
 这两个接口会按 shard 分布式执行，并在对应 shard owner 上提交 Lucene 变更。
+
+### 上传状态与自愈
+
+查看所有 index 的异步上传状态：
+
+```bash
+curl http://127.0.0.1:9200/_uploads
+```
+
+查看单个 index：
+
+```bash
+curl http://127.0.0.1:9200/books/_uploads
+```
+
+响应会按 shard 返回 owner、pending 文件数、状态计数、最新 remote snapshot generation，以及超过 1 分钟的 pending 是否被标记为 `stuck`。后台维护器会持续重试当前 owner 上的 pending 上传；也可以手动触发一次：
+
+```bash
+curl -X POST http://127.0.0.1:9200/books/_uploads/_retry -d '{}'
+```
 
 ### ILM
 
