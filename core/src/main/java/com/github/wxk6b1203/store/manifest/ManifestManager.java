@@ -275,13 +275,24 @@ public class ManifestManager implements AutoCloseable {
         }
         try {
             ensureRemoteObjectStore();
-            metadataManager.updateFileStatus(
-                    metadata.getIndexName(),
-                    metadata.getName(),
-                    metadata.getEpoch(),
-                    IndexFileStatus.UPLOADING
-            );
-            if (!stillCurrent(metadata, IndexFileStatus.UPLOADING)) {
+            IndexFileMetadata current = metadataManager.fileMetadata(metadata.getIndexName(), metadata.getName());
+            if (!sameMetadataIdentity(metadata, current)) {
+                return false;
+            }
+            if (remoteReadable(current.getStatus())) {
+                return true;
+            }
+            if (current.getStatus() == IndexFileStatus.DIRTY) {
+                metadataManager.updateFileStatus(
+                        metadata.getIndexName(),
+                        metadata.getName(),
+                        metadata.getEpoch(),
+                        IndexFileStatus.UPLOADING
+                );
+                if (!stillCurrent(metadata, IndexFileStatus.UPLOADING)) {
+                    return false;
+                }
+            } else if (current.getStatus() != IndexFileStatus.UPLOADING) {
                 return false;
             }
             remoteObjectStore.put(metadata.getObjectKey(), source);
@@ -300,11 +311,15 @@ public class ManifestManager implements AutoCloseable {
         }
     }
 
-    private boolean stillCurrent(IndexFileMetadata expected, IndexFileStatus status) {
-        IndexFileMetadata current = metadataManager.fileMetadata(expected.getIndexName(), expected.getName());
+    private boolean sameMetadataIdentity(IndexFileMetadata expected, IndexFileMetadata current) {
         return current != null
                 && current.getEpoch() == expected.getEpoch()
-                && Objects.equals(current.getObjectKey(), expected.getObjectKey())
+                && Objects.equals(current.getObjectKey(), expected.getObjectKey());
+    }
+
+    private boolean stillCurrent(IndexFileMetadata expected, IndexFileStatus status) {
+        IndexFileMetadata current = metadataManager.fileMetadata(expected.getIndexName(), expected.getName());
+        return sameMetadataIdentity(expected, current)
                 && current.getStatus() == status;
     }
 

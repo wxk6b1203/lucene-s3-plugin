@@ -39,6 +39,8 @@ import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.errors.NotMasterException;
 import com.github.wxk6b1203.errors.StorageException;
 import com.github.wxk6b1203.index.IndexDocumentRequest;
+import com.github.wxk6b1203.index.IndexDocumentOperation;
+import com.github.wxk6b1203.index.IndexDocumentOperationResult;
 import com.github.wxk6b1203.index.IndexDocumentResponse;
 import com.github.wxk6b1203.index.LocalShardIndexService;
 import com.github.wxk6b1203.index.LuceneLocalShardIndexService;
@@ -132,6 +134,7 @@ public class HttpApiServer implements AutoCloseable {
     private final ManifestMetadataManager manifestMetadataManager;
     private final RemoteObjectStore remoteObjectStore;
     private final ClusterMaintenanceService maintenanceService;
+    private final ServerMetrics serverMetrics;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
     private final AtomicBoolean maintenanceRunning = new AtomicBoolean();
     private Long maintenanceTimerId;
@@ -176,6 +179,7 @@ public class HttpApiServer implements AutoCloseable {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
+        this.serverMetrics = new ServerMetrics(options.metricsPort());
         if (options.etcdEnabled()) {
             this.etcdClient = Client.builder().endpoints(options.etcdEndpoints()).build();
             EtcdClusterStateRepository etcdRepository = new EtcdClusterStateRepository(
@@ -286,45 +290,58 @@ public class HttpApiServer implements AutoCloseable {
         return endpoint != null && endpoint.toLowerCase(Locale.ROOT).contains("aliyuncs.com");
     }
 
+    private void recordMetrics(RoutingContext context) {
+        long started = System.nanoTime();
+        serverMetrics.requestStarted();
+        context.response().bodyEndHandler(ignored -> serverMetrics.requestFinished(
+                context.request().method().name(),
+                context.normalizedPath(),
+                context.response().getStatusCode(),
+                System.nanoTime() - started
+        ));
+        context.next();
+    }
+
     public Future<HttpServer> start() {
         Router router = Router.router(vertx);
+        router.route().handler(this::recordMetrics);
         router.route().handler(BodyHandler.create());
 
-        router.post("/_internal/:index/:shard/_search").handler(this::internalShardSearch);
-        router.post("/_internal/:index/:shard/_pit").handler(this::internalShardOpenPit);
-        router.delete("/_internal/_pit/:pit").handler(this::internalShardClosePit);
-        router.post("/_internal/:index/:shard/_bulk").handler(this::internalShardBulk);
-        router.post("/_internal/:index/:shard/_delete_by_query").handler(this::internalShardDeleteByQuery);
-        router.post("/_internal/:index/:shard/_update_by_query").handler(this::internalShardUpdateByQuery);
-        router.get("/_cluster/state").handler(this::clusterState);
-        router.get("/_cluster/health").handler(this::clusterHealth);
-        router.get("/_nodes").handler(this::nodes);
-        router.get("/_nodes/stats").handler(this::nodeStats);
-        router.get("/_shards").handler(this::shards);
-        router.get("/_snapshot_status").handler(this::snapshotStatus);
-        router.get("/_uploads").handler(this::uploadStatus);
-        router.post("/_uploads/_retry").handler(this::retryUploads);
-        router.post("/_bulk").handler(this::bulk);
-        router.delete("/_pit").handler(this::closePointInTime);
-        router.put("/:index").handler(this::createIndex);
-        router.delete("/:index").handler(this::deleteIndex);
-        router.get("/:index/_uploads").handler(this::uploadStatus);
-        router.post("/:index/_uploads/_retry").handler(this::retryUploads);
-        router.get("/:index/_mapping").handler(this::getMapping);
-        router.put("/:index/_mapping").handler(this::putMapping);
-        router.post("/:index/_bulk").handler(this::bulk);
-        router.post("/:index/_doc").handler(this::indexDocument);
-        router.post("/:index/_doc/:id").handler(this::indexDocument);
-        router.delete("/:index/_doc/:id").handler(this::deleteDocument);
-        router.post("/:index/_search").handler(this::search);
-        router.post("/:index/_pit").handler(this::openPointInTime);
-        router.post("/:index/_search_plan").handler(this::searchPlan);
-        router.post("/:index/_knn_search").handler(this::knnSearch);
-        router.get("/:index/_write_route").handler(this::writeRoute);
-        router.post("/:index/_update_by_query").handler(this::updateByQuery);
-        router.post("/:index/_delete_by_query").handler(this::deleteByQuery);
-        router.put("/_ilm/policy/:policy").handler(this::putLifecyclePolicy);
-        router.put("/:index/_ilm/policy/:policy").handler(this::attachLifecyclePolicy);
+        router.post("/_internal/:index/:shard/_search").blockingHandler(this::internalShardSearch, false);
+        router.post("/_internal/:index/:shard/_pit").blockingHandler(this::internalShardOpenPit, false);
+        router.delete("/_internal/_pit/:pit").blockingHandler(this::internalShardClosePit, false);
+        router.post("/_internal/:index/:shard/_bulk").blockingHandler(this::internalShardBulk, false);
+        router.post("/_internal/:index/:shard/_delete_by_query").blockingHandler(this::internalShardDeleteByQuery, false);
+        router.post("/_internal/:index/:shard/_update_by_query").blockingHandler(this::internalShardUpdateByQuery, false);
+        router.get("/_cluster/state").blockingHandler(this::clusterState, false);
+        router.get("/_cluster/health").blockingHandler(this::clusterHealth, false);
+        router.get("/_nodes").blockingHandler(this::nodes, false);
+        router.get("/_nodes/stats").blockingHandler(this::nodeStats, false);
+        router.get("/_shards").blockingHandler(this::shards, false);
+        router.get("/_snapshot_status").blockingHandler(this::snapshotStatus, false);
+        router.get("/_uploads").blockingHandler(this::uploadStatus, false);
+        router.post("/_uploads/_retry").blockingHandler(this::retryUploads, false);
+        router.post("/_bulk").blockingHandler(this::bulk, false);
+        router.delete("/_pit").blockingHandler(this::closePointInTime, false);
+        router.put("/:index").blockingHandler(this::createIndex, false);
+        router.delete("/:index").blockingHandler(this::deleteIndex, false);
+        router.get("/:index/_uploads").blockingHandler(this::uploadStatus, false);
+        router.post("/:index/_uploads/_retry").blockingHandler(this::retryUploads, false);
+        router.get("/:index/_mapping").blockingHandler(this::getMapping, false);
+        router.put("/:index/_mapping").blockingHandler(this::putMapping, false);
+        router.post("/:index/_bulk").blockingHandler(this::bulk, false);
+        router.post("/:index/_doc").blockingHandler(this::indexDocument, false);
+        router.post("/:index/_doc/:id").blockingHandler(this::indexDocument, false);
+        router.delete("/:index/_doc/:id").blockingHandler(this::deleteDocument, false);
+        router.post("/:index/_search").blockingHandler(this::search, false);
+        router.post("/:index/_pit").blockingHandler(this::openPointInTime, false);
+        router.post("/:index/_search_plan").blockingHandler(this::searchPlan, false);
+        router.post("/:index/_knn_search").blockingHandler(this::knnSearch, false);
+        router.get("/:index/_write_route").blockingHandler(this::writeRoute, false);
+        router.post("/:index/_update_by_query").blockingHandler(this::updateByQuery, false);
+        router.post("/:index/_delete_by_query").blockingHandler(this::deleteByQuery, false);
+        router.put("/_ilm/policy/:policy").blockingHandler(this::putLifecyclePolicy, false);
+        router.put("/:index/_ilm/policy/:policy").blockingHandler(this::attachLifecyclePolicy, false);
 
         try {
             clusterCoordinator.start();
@@ -388,6 +405,7 @@ public class HttpApiServer implements AutoCloseable {
             response.put("pending_upload_shards", pendingUploads);
             response.put("stuck_upload_shards", stuckUploads);
             response.put("cluster_state_version", state.version());
+            serverMetrics.setClusterHealth(activeShards, unassignedShards, pendingUploads, stuckUploads);
             json(context, 200, response);
         } catch (Exception e) {
             error(context, status(e), e);
@@ -430,10 +448,16 @@ public class HttpApiServer implements AutoCloseable {
             localStats.put("roles", localNode.roles());
             localStats.put("coordinating_pits", pits.size());
             localStats.put("local_pits", localShardIndexService.openPointInTimeCount());
-            localStats.put("cache", RemoteCacheStats.snapshot());
+            Map<String, Object> cacheStats = RemoteCacheStats.snapshot();
+            Map<String, Object> s3Stats = S3RemoteObjectStore.statsSnapshot();
+            localStats.put("cache", cacheStats);
             localStats.put("cache_cleanup", maintenanceService.cacheStatus());
-            localStats.put("s3", S3RemoteObjectStore.statsSnapshot());
+            localStats.put("s3", s3Stats);
+            localStats.put("metrics_port", serverMetrics.metricsPort());
             localStats.put("cluster_state_version", state.version());
+            serverMetrics.setPitCounts(pits.size(), localShardIndexService.openPointInTimeCount());
+            serverMetrics.setCacheStats(cacheStats);
+            serverMetrics.setS3Stats(s3Stats);
             Map<String, Object> nodes = new LinkedHashMap<>();
             nodes.put(localNode.id(), localStats);
             json(context, 200, Map.of("nodes", nodes));
@@ -1186,23 +1210,17 @@ public class HttpApiServer implements AutoCloseable {
 
     private List<Future<List<BulkItemResult>>> executeBulkItems(List<BulkItemRequest> items, ClusterState state) {
         List<Future<List<BulkItemResult>>> futures = new ArrayList<>();
+        Map<BulkShardBatchKey, List<BulkItemPlan>> localBatches = new LinkedHashMap<>();
         Map<BulkShardBatchKey, List<BulkItemPlan>> remoteBatches = new LinkedHashMap<>();
         for (int ordinal = 0; ordinal < items.size(); ordinal++) {
             BulkItemRequest item = items.get(ordinal);
             try {
                 BulkItemPlan plan = bulkItemPlan(ordinal, item, state);
+                BulkShardBatchKey key = bulkShardBatchKey(plan);
                 if (localNode.id().equals(plan.route().nodeId())) {
-                    futures.add(Future.succeededFuture(List.of(executeLocalBulkPlan(plan))));
+                    localBatches.computeIfAbsent(key, ignored -> new ArrayList<>()).add(plan);
                     continue;
                 }
-                BulkShardBatchKey key = new BulkShardBatchKey(
-                        plan.route().nodeId(),
-                        plan.route().host(),
-                        plan.route().httpPort(),
-                        plan.route().shardId(),
-                        plan.route().ownerTerm(),
-                        plan.route().allocationEpoch()
-                );
                 remoteBatches.computeIfAbsent(key, ignored -> new ArrayList<>()).add(plan);
             } catch (Exception e) {
                 futures.add(Future.succeededFuture(List.of(new BulkItemResult(
@@ -1211,8 +1229,20 @@ public class HttpApiServer implements AutoCloseable {
                 ))));
             }
         }
+        localBatches.forEach((key, plans) -> futures.add(Future.succeededFuture(executeLocalBulkBatch(key, plans))));
         remoteBatches.forEach((key, plans) -> futures.add(executeRemoteBulkBatch(key, plans)));
         return futures;
+    }
+
+    private BulkShardBatchKey bulkShardBatchKey(BulkItemPlan plan) {
+        return new BulkShardBatchKey(
+                plan.route().nodeId(),
+                plan.route().host(),
+                plan.route().httpPort(),
+                plan.route().shardId(),
+                plan.route().ownerTerm(),
+                plan.route().allocationEpoch()
+        );
     }
 
     private BulkItemPlan bulkItemPlan(int ordinal, BulkItemRequest item, ClusterState state) {
@@ -1229,15 +1259,49 @@ public class HttpApiServer implements AutoCloseable {
         return new BulkItemPlan(ordinal, item, id, route, settings.mappings());
     }
 
-    private BulkItemResult executeLocalBulkPlan(BulkItemPlan plan) {
+    private List<BulkItemResult> executeLocalBulkBatch(BulkShardBatchKey key, List<BulkItemPlan> plans) {
         try {
-            validateShardWriteFence(plan.route().shardId(), plan.route().ownerTerm(), plan.route().allocationEpoch());
-            return new BulkItemResult(
-                    plan.ordinal(),
-                    executeLocalBulkItem(plan.item(), plan.route().shardId(), plan.id(), plan.mappings())
-            );
+            validateShardWriteFence(key.shardId(), key.ownerTerm(), key.allocationEpoch());
+            List<IndexDocumentOperation> operations = plans.stream()
+                    .map(plan -> new IndexDocumentOperation(
+                            plan.item().action(),
+                            new IndexDocumentRequest(
+                                    plan.item().index(),
+                                    plan.route().shardId(),
+                                    plan.id(),
+                                    plan.item().source(),
+                                    plan.mappings(),
+                                    plan.item().action().equals("create")
+                            )
+                    ))
+                    .toList();
+            List<IndexDocumentOperationResult> results = localShardIndexService.bulk(operations);
+            if (results.size() != plans.size()) {
+                throw new IllegalStateException("local bulk result count mismatch: expected "
+                        + plans.size() + ", actual " + results.size());
+            }
+            List<BulkItemResult> bulkResults = new ArrayList<>(plans.size());
+            for (int i = 0; i < plans.size(); i++) {
+                BulkItemPlan plan = plans.get(i);
+                IndexDocumentOperationResult result = results.get(i);
+                if (result.failed()) {
+                    bulkResults.add(new BulkItemResult(
+                            plan.ordinal(),
+                            bulkError(plan.item(), plan.id(), status(result.failure()), result.failure())
+                    ));
+                } else {
+                    int successStatus = plan.item().action().equals("delete") ? 200 : 201;
+                    bulkResults.add(new BulkItemResult(
+                            plan.ordinal(),
+                            bulkSuccess(plan.item(), result.response(), successStatus)
+                    ));
+                }
+            }
+            return bulkResults;
         } catch (Exception e) {
-            return new BulkItemResult(plan.ordinal(), bulkError(plan.item(), plan.id(), status(e), e));
+            return plans.stream()
+                    .map(plan -> new BulkItemResult(plan.ordinal(), bulkError(plan.item(), plan.id(), status(e), e)))
+                    .toList();
         }
     }
 
@@ -2483,8 +2547,35 @@ public class HttpApiServer implements AutoCloseable {
         try {
             cleanupExpiredPits();
             maintenanceService.tick();
+            refreshRuntimeMetrics();
         } finally {
             maintenanceRunning.set(false);
+        }
+    }
+
+    private void refreshRuntimeMetrics() {
+        try {
+            ClusterState state = clusterStateRepository.current();
+            Map<String, Object> uploads = maintenanceService.uploadStatus(null);
+            Map<String, Object> summary = mapValue(uploads.get("summary"));
+            long activeShards = state.routingTable().stream()
+                    .filter(routing -> routing.state() == ShardState.STARTED)
+                    .count();
+            long unassignedShards = state.routingTable().stream()
+                    .filter(routing -> routing.state() != ShardState.STARTED
+                            || !state.nodes().containsKey(routing.nodeId()))
+                    .count();
+            serverMetrics.setClusterHealth(
+                    activeShards,
+                    unassignedShards,
+                    longValue(summary.get("pending_shards"), 0),
+                    longValue(summary.get("stuck_shards"), 0)
+            );
+            serverMetrics.setPitCounts(pits.size(), localShardIndexService.openPointInTimeCount());
+            serverMetrics.setCacheStats(RemoteCacheStats.snapshot());
+            serverMetrics.setS3Stats(S3RemoteObjectStore.statsSnapshot());
+        } catch (Exception e) {
+            log.debug("failed to refresh Prometheus metrics", e);
         }
     }
 
@@ -2778,5 +2869,6 @@ public class HttpApiServer implements AutoCloseable {
         if (s3Client != null) {
             s3Client.close();
         }
+        serverMetrics.close();
     }
 }

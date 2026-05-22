@@ -9,12 +9,29 @@ import com.github.wxk6b1203.search.SearchResponse;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 
 public interface LocalShardIndexService extends AutoCloseable {
     IndexDocumentResponse index(IndexDocumentRequest request) throws IOException;
 
     IndexDocumentResponse delete(IndexDocumentRequest request) throws IOException;
+
+    default List<IndexDocumentOperationResult> bulk(Collection<IndexDocumentOperation> operations) throws IOException {
+        List<IndexDocumentOperationResult> results = new ArrayList<>(operations.size());
+        for (IndexDocumentOperation operation : operations) {
+            try {
+                IndexDocumentResponse response = operation.delete()
+                        ? delete(operation.request())
+                        : index(operation.request());
+                results.add(IndexDocumentOperationResult.success(response));
+            } catch (Exception e) {
+                results.add(IndexDocumentOperationResult.failure(e));
+            }
+        }
+        return results;
+    }
 
     SearchResponse search(ShardId shardId, SearchRequest request) throws IOException;
 

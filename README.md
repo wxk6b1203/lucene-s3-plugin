@@ -203,6 +203,7 @@ Windows 使用：
 | `--node-name` | `local-node` | 节点显示名。 |
 | `--host` | `127.0.0.1` | 对外发布的 host，跨节点转发会使用它。 |
 | `--roles` | `MASTER,DATA,COORDINATING` | 逗号分隔角色，可选 `MASTER`,`DATA`,`INGEST`,`COORDINATING`。服务会自动补充 coordinating 能力。 |
+| `--metrics-port` | `0` | Prometheus metrics 独立 HTTP 端口。`0` 表示关闭。 |
 | `--etcd-endpoints` | 空 | etcd endpoint，例如 `http://127.0.0.1:2379`。为空时使用单节点内存元数据。 |
 | `--etcd-namespace` | `lucene-s3/cluster` | etcd 中保存集群状态和 manifest 元数据的 namespace。 |
 | `--etcd-timeout` | `10` | etcd 启动和元数据操作超时时间，单位秒。启动阶段超过该时间会失败退出。 |
@@ -230,6 +231,8 @@ server:
     id: n1
     name: n1
     host: 127.0.0.1
+  metrics:
+    port: 9300
   roles: [MASTER, DATA, COORDINATING]
   etcd:
     endpoints: http://127.0.0.1:2379
@@ -285,6 +288,14 @@ curl http://127.0.0.1:9200/_snapshot_status
 ```
 
 `/_cluster/health` 汇总 master、节点数、active shards、pending/stuck uploads 和 cluster state version。`/_shards` 展示每个 shard 的 owner、owner term、routing allocation epoch、远端 snapshot generation 和 pending uploads。`/_nodes/stats` 当前返回本节点的 PIT 数、remote cache 命中率、缓存清理状态和 S3 操作/错误计数。
+
+如果启动时设置了 `--metrics-port 9300`，Prometheus 可抓取独立端口上的指标，避免 metrics scrape 被主 HTTP API 的 Lucene/IO 请求阻塞：
+
+```bash
+curl http://127.0.0.1:9300/metrics
+```
+
+当前暴露 HTTP 请求数/耗时、活跃请求、shard 状态、pending/stuck uploads、PIT 数、本地 remote cache 命中和 S3 操作/错误计数。
 
 查看某个 routing 会写到哪个节点：
 
@@ -675,6 +686,22 @@ curl -X POST http://127.0.0.1:9200/books/_search_plan \
 - `502`: 远端 shard RPC 或 S3-compatible 服务返回错误。
 - `503`: 当前节点不是 master、master 不可用、无可用 DATA 节点、etcd/S3 客户端不可用等临时后端不可用。
 - `500`: 本地 IO 或未分类内部错误。
+
+## 压力测试
+
+压力测试默认不随普通测试执行，需要显式打开：
+
+```powershell
+$env:LUCENE_S3_STRESS="true"
+$env:LUCENE_S3_STRESS_DOCS="1000"
+$env:LUCENE_S3_STRESS_BULK_SIZE="50"
+$env:LUCENE_S3_STRESS_WRITE_THREADS="4"
+$env:LUCENE_S3_STRESS_SEARCH_THREADS="4"
+$env:LUCENE_S3_STRESS_SECONDS="8"
+.\gradlew.bat :server:test --tests com.github.wxk6b1203.http.HttpApiServerStressTest --rerun-tasks --stacktrace
+```
+
+测试会启动单节点服务，混合执行 `_bulk`、`_search`、`_knn_search` 和观测接口请求，并把 JSON 报告写到 `server/build/reports/stress/http-api-stress.json`。可选环境变量还包括 `LUCENE_S3_STRESS_SHARDS`、`LUCENE_S3_STRESS_CATEGORIES`、`LUCENE_S3_STRESS_CACHE_MAX_BYTES` 和 `LUCENE_S3_STRESS_METRICS_PORT`。
 
 ## 当前限制和注意事项
 

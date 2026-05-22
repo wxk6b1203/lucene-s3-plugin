@@ -8,6 +8,7 @@ picocli = "4.7.7"
 slf4j = "2.0.17"
 logback = "1.5.32"
 vertx = "5.0.12"
+prometheus = "1.6.1"
 
 [libraries]
 lucene-core = { module = "org.apache.lucene:lucene-core", version.ref = "lucene" }
@@ -25,3 +26,6 @@ logback-core = { module = "ch.qos.logback:logback-core", version.ref = "logback"
 jackson-dataformat-yaml = { module = "tools.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
 vertx-core = { module = "io.vertx:vertx-core", version.ref = "vertx" }
 vertx-web = { module = "io.vertx:vertx-web", version.ref = "vertx" }
+prometheus-metrics-core = { module = "io.prometheus:prometheus-metrics-core", version.ref = "prometheus" }
+prometheus-metrics-instrumentation-jvm = { module = "io.prometheus:prometheus-metrics-instrumentation-jvm", version.ref = "prometheus" }
+prometheus-metrics-exporter-httpserver = { module = "io.prometheus:prometheus-metrics-exporter-httpserver", version.ref = "prometheus" }

@@ -62,6 +62,9 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--cache-cleanup-interval"}, description = "Local remote cache cleanup interval in seconds")
     private int cacheCleanupIntervalSeconds = 60;
 
+    @CommandLine.Option(names = {"--metrics-port"}, description = "Prometheus metrics HTTP port. 0 disables the standalone metrics exporter.")
+    private int metricsPort = 0;
+
     @CommandLine.Option(names = {"--s3-bucket"}, description = "S3 bucket for committed Lucene files")
     private String s3Bucket;
 
@@ -158,7 +161,9 @@ public class Server implements Callable<Integer> {
                 optionValue("--cache-cleanup-interval", cacheCleanupIntervalSeconds, () -> config.intValue(cacheCleanupIntervalSeconds,
                         "cacheCleanupIntervalSeconds", "cache.cleanupIntervalSeconds", "cache.cleanup.interval.seconds",
                         "server.cacheCleanupIntervalSeconds", "server.cache.cleanupIntervalSeconds",
-                        "server.cache.cleanup.interval.seconds"))
+                        "server.cache.cleanup.interval.seconds")),
+                optionValue("--metrics-port", metricsPort, () -> config.intValue(metricsPort,
+                        "metricsPort", "metrics.port", "server.metricsPort", "server.metrics.port"))
         );
     }
 

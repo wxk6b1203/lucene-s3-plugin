@@ -66,9 +66,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -132,6 +134,79 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             shardWriter.writer.commit();
         }
         return new IndexDocumentResponse(request.indexName(), request.shardId(), request.id(), "deleted", true);
+    }
+
+    @Override
+    public List<IndexDocumentOperationResult> bulk(Collection<IndexDocumentOperation> operations) throws IOException {
+        List<IndexDocumentOperation> operationList = List.copyOf(operations);
+        if (operationList.isEmpty()) {
+            return List.of();
+        }
+        ShardId shardId = null;
+        for (IndexDocumentOperation operation : operationList) {
+            if (operation.request() == null) {
+                throw new IllegalArgumentException("bulk operation request is required");
+            }
+            if (shardId == null) {
+                shardId = operation.request().shardId();
+            } else if (!shardId.equals(operation.request().shardId())) {
+                throw new IllegalArgumentException("bulk batch must target a single shard");
+            }
+        }
+        ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
+        synchronized (shardWriter) {
+            List<IndexDocumentOperationResult> results = new ArrayList<>(operationList.size());
+            List<Integer> successfulPositions = new ArrayList<>();
+            Set<String> createdIds = new HashSet<>();
+            for (int i = 0; i < operationList.size(); i++) {
+                IndexDocumentOperation operation = operationList.get(i);
+                IndexDocumentRequest request = operation.request();
+                String id = request.id() == null || request.id().isBlank() ? UUID.randomUUID().toString() : request.id();
+                try {
+                    IndexDocumentResponse response;
+                    if (operation.delete()) {
+                        shardWriter.writer.deleteDocuments(new Term("_id", id));
+                        response = new IndexDocumentResponse(request.indexName(), request.shardId(), id, "deleted", true);
+                    } else {
+                        Document document = document(request.indexName(), request.shardId(), id, request.source(), request.mappings());
+                        if (request.createOnly()) {
+                            if (!createdIds.add(id)) {
+                                throw new IllegalArgumentException("document already exists: " + id);
+                            }
+                            try (DirectoryReader reader = DirectoryReader.open(shardWriter.writer)) {
+                                if (new IndexSearcher(reader).count(new TermQuery(new Term("_id", id))) > 0) {
+                                    throw new IllegalArgumentException("document already exists: " + id);
+                                }
+                            }
+                            shardWriter.writer.addDocument(document);
+                        } else {
+                            shardWriter.writer.updateDocument(new Term("_id", id), document);
+                        }
+                        response = new IndexDocumentResponse(
+                                request.indexName(),
+                                request.shardId(),
+                                id,
+                                request.createOnly() ? "created" : "indexed",
+                                true
+                        );
+                    }
+                    successfulPositions.add(i);
+                    results.add(IndexDocumentOperationResult.success(response));
+                } catch (Exception e) {
+                    results.add(IndexDocumentOperationResult.failure(e));
+                }
+            }
+            if (!successfulPositions.isEmpty()) {
+                try {
+                    shardWriter.writer.commit();
+                } catch (Exception e) {
+                    for (Integer position : successfulPositions) {
+                        results.set(position, IndexDocumentOperationResult.failure(e));
+                    }
+                }
+            }
+            return results;
+        }
     }
 
     @Override

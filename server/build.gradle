@@ -30,6 +30,9 @@ dependencies {
     implementation deps.vertx.web
     implementation deps.jetcd.core
     implementation deps.slf4j.api
+    implementation deps.prometheus.metrics.core
+    implementation deps.prometheus.metrics.instrumentation.jvm
+    implementation deps.prometheus.metrics.exporter.httpserver
     runtimeOnly deps.logback.classic
 }
 
