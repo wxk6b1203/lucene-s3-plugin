@@ -42,10 +42,12 @@ import com.github.wxk6b1203.index.IndexDocumentRequest;
 import com.github.wxk6b1203.index.IndexDocumentResponse;
 import com.github.wxk6b1203.index.LocalShardIndexService;
 import com.github.wxk6b1203.index.LuceneLocalShardIndexService;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 import com.github.wxk6b1203.metadata.provider.etcd.EtcdManifestMetadataManager;
 import com.github.wxk6b1203.metadata.provider.mem.MemMockProvider;
+import com.github.wxk6b1203.store.directory.RemoteCacheStats;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import com.github.wxk6b1203.store.manifest.ManifestOptions;
 import com.github.wxk6b1203.store.object.LocalFileRemoteObjectStore;
@@ -232,7 +234,9 @@ public class HttpApiServer implements AutoCloseable {
                 manifestMetadataManager,
                 remoteObjectStore,
                 Math.max(1, options.snapshotRetainLatest()),
-                (indexName, numberOfShards) -> deleteIndexAndData(indexName, numberOfShards)
+                (indexName, numberOfShards) -> deleteIndexAndData(indexName, numberOfShards),
+                new LocalCacheManager(dataPath, options.cacheMaxBytes(), Duration.ofHours(1)),
+                Duration.ofSeconds(options.cacheCleanupIntervalSeconds())
         );
     }
 
@@ -293,7 +297,11 @@ public class HttpApiServer implements AutoCloseable {
         router.post("/_internal/:index/:shard/_delete_by_query").handler(this::internalShardDeleteByQuery);
         router.post("/_internal/:index/:shard/_update_by_query").handler(this::internalShardUpdateByQuery);
         router.get("/_cluster/state").handler(this::clusterState);
+        router.get("/_cluster/health").handler(this::clusterHealth);
         router.get("/_nodes").handler(this::nodes);
+        router.get("/_nodes/stats").handler(this::nodeStats);
+        router.get("/_shards").handler(this::shards);
+        router.get("/_snapshot_status").handler(this::snapshotStatus);
         router.get("/_uploads").handler(this::uploadStatus);
         router.post("/_uploads/_retry").handler(this::retryUploads);
         router.post("/_bulk").handler(this::bulk);
@@ -347,6 +355,120 @@ public class HttpApiServer implements AutoCloseable {
         } catch (IOException e) {
             error(context, 500, e);
         }
+    }
+
+    private void clusterHealth(RoutingContext context) {
+        try {
+            ClusterState state = clusterStateRepository.current();
+            Map<String, Object> uploads = maintenanceService.uploadStatus(null);
+            Map<String, Object> summary = mapValue(uploads.get("summary"));
+            long pendingUploads = longValue(summary.get("pending_shards"), 0);
+            long stuckUploads = longValue(summary.get("stuck_shards"), 0);
+            long activeShards = state.routingTable().stream()
+                    .filter(routing -> routing.state() == ShardState.STARTED)
+                    .count();
+            long unassignedShards = state.routingTable().stream()
+                    .filter(routing -> routing.state() != ShardState.STARTED
+                            || !state.nodes().containsKey(routing.nodeId()))
+                    .count();
+            String status = "green";
+            if (state.masterNodeId() == null || unassignedShards > 0) {
+                status = "red";
+            } else if (pendingUploads > 0 || stuckUploads > 0) {
+                status = "yellow";
+            }
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("cluster_name", state.clusterName());
+            response.put("status", status);
+            response.put("timed_out", false);
+            response.put("master_node", state.masterNodeId());
+            response.put("number_of_nodes", state.nodes().size());
+            response.put("active_shards", activeShards);
+            response.put("unassigned_shards", unassignedShards);
+            response.put("pending_upload_shards", pendingUploads);
+            response.put("stuck_upload_shards", stuckUploads);
+            response.put("cluster_state_version", state.version());
+            json(context, 200, response);
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private void shards(RoutingContext context) {
+        try {
+            ClusterState state = clusterStateRepository.current();
+            List<Map<String, Object>> shards = state.routingTable().stream()
+                    .sorted(java.util.Comparator
+                            .comparing((ShardRouting routing) -> routing.shardId().indexName())
+                            .thenComparingInt(routing -> routing.shardId().shardNumber()))
+                    .map(routing -> shardStats(state, routing))
+                    .toList();
+            json(context, 200, Map.of(
+                    "cluster_state_version", state.version(),
+                    "shards", shards
+            ));
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private void snapshotStatus(RoutingContext context) {
+        try {
+            json(context, 200, maintenanceService.uploadStatus(context.queryParams().get("index")));
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private void nodeStats(RoutingContext context) {
+        try {
+            ClusterState state = clusterStateRepository.current();
+            Map<String, Object> localStats = new LinkedHashMap<>();
+            localStats.put("name", localNode.name());
+            localStats.put("host", localNode.host());
+            localStats.put("http_port", localNode.httpPort());
+            localStats.put("roles", localNode.roles());
+            localStats.put("coordinating_pits", pits.size());
+            localStats.put("local_pits", localShardIndexService.openPointInTimeCount());
+            localStats.put("cache", RemoteCacheStats.snapshot());
+            localStats.put("cache_cleanup", maintenanceService.cacheStatus());
+            localStats.put("s3", S3RemoteObjectStore.statsSnapshot());
+            localStats.put("cluster_state_version", state.version());
+            Map<String, Object> nodes = new LinkedHashMap<>();
+            nodes.put(localNode.id(), localStats);
+            json(context, 200, Map.of("nodes", nodes));
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private Map<String, Object> shardStats(ClusterState state, ShardRouting routing) {
+        ShardId shardId = routing.shardId();
+        ClusterNode owner = state.nodes().get(routing.nodeId());
+        IndexCommitSnapshot snapshot = latestRemoteSnapshot(shardId);
+        String physicalIndexName = physicalIndexName(shardId);
+        long pendingUploads = manifestMetadataManager.listAll(physicalIndexName, List.of(
+                        IndexFileStatus.DIRTY,
+                        IndexFileStatus.UPLOADING
+                ))
+                .stream()
+                .filter(metadata -> metadata.getStatus() == IndexFileStatus.DIRTY
+                        || metadata.getStatus() == IndexFileStatus.UPLOADING)
+                .count();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("index", shardId.indexName());
+        result.put("shard", shardId.shardNumber());
+        result.put("physical_index", physicalIndexName);
+        result.put("state", routing.state());
+        result.put("owner_node", routing.nodeId());
+        result.put("owner_live", owner != null);
+        result.put("owner_term", routing.ownerTerm());
+        result.put("allocation_epoch", routing.allocationEpoch());
+        result.put("latest_snapshot_generation", snapshot == null ? null : snapshot.getGeneration());
+        result.put("latest_snapshot_segment", snapshot == null ? null : snapshot.getSegmentFileName());
+        result.put("remote_snapshot_ready", remoteSnapshotReady(shardId, snapshot));
+        result.put("pending_uploads", pendingUploads);
+        return result;
     }
 
     private void uploadStatus(RoutingContext context) {
@@ -860,7 +982,8 @@ public class HttpApiServer implements AutoCloseable {
                 request.searchAfter(),
                 null,
                 request.mappings(),
-                request.readPreference()
+                request.readPreference(),
+                request.remoteSnapshotGeneration()
         );
         List<Future<SearchResponse>> futures = plan.targets().stream()
                 .map(target -> executeShardSearch(target, withPit(shardRequest, pit, target)))
@@ -898,7 +1021,8 @@ public class HttpApiServer implements AutoCloseable {
             Map<String, Integer> load
     ) {
         ShardRouting routing = routingFor(base.shardId(), state);
-        if (consistency.equalsIgnoreCase("strong") || remoteSnapshotReady(base.shardId())) {
+        IndexCommitSnapshot snapshot = latestRemoteSnapshot(base.shardId());
+        if (consistency.equalsIgnoreCase("strong") || remoteSnapshotReady(base.shardId(), snapshot)) {
             ClusterNode node = leastLoaded(dataNodes, load);
             load.merge(node.id(), 1, Integer::sum);
             return new SearchShardTarget(
@@ -908,7 +1032,8 @@ public class HttpApiServer implements AutoCloseable {
                     node.httpPort(),
                     routing.ownerTerm(),
                     routing.allocationEpoch(),
-                    true
+                    true,
+                    snapshot == null ? -1L : snapshot.getGeneration()
             );
         }
         ClusterNode owner = state.nodes().get(routing.nodeId());
@@ -925,11 +1050,19 @@ public class HttpApiServer implements AutoCloseable {
                 owner.httpPort(),
                 routing.ownerTerm(),
                 routing.allocationEpoch(),
-                false
+                false,
+                null
         );
     }
 
     private boolean remoteSnapshotReady(ShardId shardId) {
+        return remoteSnapshotReady(shardId, latestRemoteSnapshot(shardId));
+    }
+
+    private boolean remoteSnapshotReady(ShardId shardId, IndexCommitSnapshot snapshot) {
+        if (snapshot == null) {
+            return false;
+        }
         String physicalIndexName = physicalIndexName(shardId);
         return manifestMetadataManager.listAll(physicalIndexName, List.of(
                         IndexFileStatus.DIRTY,
@@ -940,6 +1073,10 @@ public class HttpApiServer implements AutoCloseable {
                 .stream()
                 .noneMatch(metadata -> metadata.getStatus() == IndexFileStatus.DIRTY
                         || metadata.getStatus() == IndexFileStatus.UPLOADING);
+    }
+
+    private IndexCommitSnapshot latestRemoteSnapshot(ShardId shardId) {
+        return manifestMetadataManager.latestSnapshot(physicalIndexName(shardId));
     }
 
     private ShardRouting routingFor(ShardId shardId, ClusterState state) {
@@ -1328,13 +1465,14 @@ public class HttpApiServer implements AutoCloseable {
                 request.searchAfter(),
                 pit.shardPitIds().get(target.shardId().routeKey()),
                 request.mappings(),
-                request.readPreference()
+                request.readPreference(),
+                request.remoteSnapshotGeneration()
         );
     }
 
     private Future<SearchResponse> executeShardSearch(SearchShardTarget target, SearchRequest request) {
         if (target.remoteSnapshot()) {
-            request = withReadPreference(request, "remote");
+            request = withRemoteSnapshot(request, target.remoteSnapshotGeneration());
         }
         if (localNode.id().equals(target.nodeId())) {
             try {
@@ -1368,7 +1506,26 @@ public class HttpApiServer implements AutoCloseable {
                 request.searchAfter(),
                 request.pitId(),
                 request.mappings(),
-                readPreference
+                readPreference,
+                request.remoteSnapshotGeneration()
+        );
+    }
+
+    private SearchRequest withRemoteSnapshot(SearchRequest request, Long remoteSnapshotGeneration) {
+        return new SearchRequest(
+                request.indexName(),
+                request.query(),
+                request.aggregations(),
+                request.vector(),
+                request.routing(),
+                request.from(),
+                request.size(),
+                request.sort(),
+                request.searchAfter(),
+                request.pitId(),
+                request.mappings(),
+                "remote",
+                remoteSnapshotGeneration
         );
     }
 
@@ -2269,6 +2426,10 @@ public class HttpApiServer implements AutoCloseable {
 
     private int intValue(Object value, int defaultValue) {
         return value instanceof Number number ? number.intValue() : defaultValue;
+    }
+
+    private long longValue(Object value, long defaultValue) {
+        return value instanceof Number number ? number.longValue() : defaultValue;
     }
 
     private Integer intObject(Object value) {

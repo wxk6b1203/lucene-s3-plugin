@@ -39,6 +39,10 @@ public interface LocalShardIndexService extends AutoCloseable {
 
     void retryPendingUploads(Collection<ShardId> shardIds) throws IOException;
 
+    default int openPointInTimeCount() {
+        return 0;
+    }
+
     @Override
     void close() throws IOException;
 }

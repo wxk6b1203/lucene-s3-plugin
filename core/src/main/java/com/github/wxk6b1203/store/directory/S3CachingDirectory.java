@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -48,6 +49,7 @@ public class S3CachingDirectory extends BaseDirectory {
     private final NIOFSDirectory sharedDirectory;
     private final List<IndexFileStatus> readableRemoteStatuses;
     private final boolean includeWalFiles;
+    private final boolean fixedRemoteSnapshotSelection;
     private final IndexCommitSnapshot remoteSnapshot;
     private final Map<String, IndexFileMetadata> remoteSnapshotFiles;
     private final Set<String> syncedFiles = new ConcurrentSkipListSet<>();
@@ -85,13 +87,29 @@ public class S3CachingDirectory extends BaseDirectory {
             List<IndexFileStatus> readableRemoteStatuses,
             boolean includeWalFiles
     ) throws IOException {
+        this(options, lockFactory, manifestManager, readableRemoteStatuses, includeWalFiles, null);
+    }
+
+    public S3CachingDirectory(
+            S3DirectoryOptions options,
+            LockFactory lockFactory,
+            ManifestManager manifestManager,
+            List<IndexFileStatus> readableRemoteStatuses,
+            boolean includeWalFiles,
+            Long remoteSnapshotGeneration
+    ) throws IOException {
         super(lockFactory);
         this.basePath = options.basePath();
         this.indexName = options.indexName();
         this.manifestManager = manifestManager;
         this.readableRemoteStatuses = List.copyOf(readableRemoteStatuses);
         this.includeWalFiles = includeWalFiles;
-        this.remoteSnapshot = manifestManager.latestSnapshot(indexName);
+        this.fixedRemoteSnapshotSelection = remoteSnapshotGeneration != null;
+        this.remoteSnapshot = remoteSnapshotGeneration == null
+                ? manifestManager.latestSnapshot(indexName)
+                : remoteSnapshotGeneration < 0
+                ? null
+                : manifestManager.snapshot(indexName, remoteSnapshotGeneration);
         this.remoteSnapshotFiles = snapshotFiles(remoteSnapshot);
         this.walDataPath = PathUtil.walDataPath(basePath, indexName);
         this.sharedDataPath = PathUtil.sharedDataPath(basePath, indexName);
@@ -114,6 +132,9 @@ public class S3CachingDirectory extends BaseDirectory {
             remoteSnapshotFiles.keySet().stream()
                     .filter(name -> !deletedRemoteFiles.contains(name))
                     .forEach(names::add);
+            return names.toArray(String[]::new);
+        }
+        if (fixedRemoteSnapshotSelection) {
             return names.toArray(String[]::new);
         }
         try {
@@ -340,10 +361,12 @@ public class S3CachingDirectory extends BaseDirectory {
             if (localFileAvailable(name)) {
                 return;
             }
+            RemoteCacheStats.miss();
             IndexFileMetadata metadata = readableRemoteFileMetadata(name);
             Path temp = sharedTempPath.resolve(name + "." + Thread.currentThread().threadId() + ".tmp");
             try {
                 manifestManager.download(metadata, temp);
+                RemoteCacheStats.download();
                 if (localFileAvailable(name)) {
                     return;
                 }
@@ -376,6 +399,9 @@ public class S3CachingDirectory extends BaseDirectory {
         if (remoteSnapshot != null) {
             throw new java.nio.file.NoSuchFileException(name);
         }
+        if (fixedRemoteSnapshotSelection) {
+            throw new java.nio.file.NoSuchFileException(name);
+        }
         IndexFileMetadata metadata = manifestManager.fileMetadata(indexName, name);
         if (!readableRemoteStatuses.contains(metadata.getStatus())) {
             throw new java.nio.file.NoSuchFileException(name);
@@ -403,9 +429,16 @@ public class S3CachingDirectory extends BaseDirectory {
             return false;
         }
         if (cacheMatches(sharedFile, metadata)) {
+            RemoteCacheStats.hit();
+            try {
+                Files.setLastModifiedTime(sharedFile, FileTime.fromMillis(System.currentTimeMillis()));
+            } catch (IOException ignored) {
+            }
             return true;
         }
+        RemoteCacheStats.corruption();
         deleteIfExists(sharedFile);
+        RemoteCacheStats.miss();
         return false;
     }
 

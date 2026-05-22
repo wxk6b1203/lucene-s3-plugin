@@ -9,8 +9,21 @@ public record SearchShardTarget(
         int httpPort,
         long ownerTerm,
         long allocationEpoch,
-        boolean remoteSnapshot
+        boolean remoteSnapshot,
+        Long remoteSnapshotGeneration
 ) {
+    public SearchShardTarget(
+            ShardId shardId,
+            String nodeId,
+            String host,
+            int httpPort,
+            long ownerTerm,
+            long allocationEpoch,
+            boolean remoteSnapshot
+    ) {
+        this(shardId, nodeId, host, httpPort, ownerTerm, allocationEpoch, remoteSnapshot, null);
+    }
+
     public SearchShardTarget(
             ShardId shardId,
             String nodeId,

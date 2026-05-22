@@ -278,6 +278,47 @@ class HttpApiServerTest {
     }
 
     @Test
+    @Timeout(60)
+    @SuppressWarnings("unchecked")
+    void observabilityEndpointsReportRoutingSnapshotsAndNodeStats() throws Exception {
+        startServer();
+        createBooksIndex(2);
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+        waitUntil(() -> hitIds(post("/books/_search?read_preference=strong", Map.of(
+                "query", Map.of("match_all", Map.of()),
+                "size", 10
+        ), 200)).contains("doc-1"));
+
+        Map<String, Object> health = get("/_cluster/health", 200);
+        assertEquals("green", health.get("status"));
+        assertEquals(2, ((Number) health.get("active_shards")).intValue());
+
+        Map<String, Object> shards = get("/_shards", 200);
+        List<Map<String, Object>> shardRows = (List<Map<String, Object>>) shards.get("shards");
+        assertEquals(2, shardRows.size());
+        assertTrue(shardRows.stream().allMatch(row -> row.containsKey("owner_node")));
+        assertTrue(shardRows.stream().anyMatch(row -> row.get("latest_snapshot_generation") != null));
+
+        Map<String, Object> snapshotStatus = get("/_snapshot_status", 200);
+        Map<String, Object> snapshotSummary = (Map<String, Object>) snapshotStatus.get("summary");
+        assertEquals(0, ((Number) snapshotSummary.get("stuck_shards")).intValue());
+
+        Map<String, Object> nodeStats = get("/_nodes/stats", 200);
+        Map<String, Object> nodes = (Map<String, Object>) nodeStats.get("nodes");
+        Map<String, Object> stats = (Map<String, Object>) nodes.values().iterator().next();
+        assertTrue(stats.containsKey("cache"));
+        assertTrue(stats.containsKey("cache_cleanup"));
+        assertTrue(stats.containsKey("s3"));
+
+        Map<String, Object> plan = post("/books/_search_plan?read_preference=strong", Map.of(
+                "query", Map.of("match_all", Map.of())
+        ), 200);
+        List<Map<String, Object>> targets = (List<Map<String, Object>>) plan.get("targets");
+        assertTrue(targets.stream().allMatch(target -> Boolean.TRUE.equals(target.get("remoteSnapshot"))));
+        assertTrue(targets.stream().anyMatch(target -> target.get("remoteSnapshotGeneration") != null));
+    }
+
+    @Test
     @Timeout(15)
     void startFailsWhenEtcdIsUnavailableBeyondTimeout() throws Exception {
         int unavailableEtcdPort = freePort();

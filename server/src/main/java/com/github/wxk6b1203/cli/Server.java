@@ -56,6 +56,12 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--data-path"}, description = "Local data/cache path")
     private String dataPath = "data";
 
+    @CommandLine.Option(names = {"--cache-max-bytes"}, description = "Maximum bytes for local remote cache. 0 disables capacity eviction.")
+    private long cacheMaxBytes = 0;
+
+    @CommandLine.Option(names = {"--cache-cleanup-interval"}, description = "Local remote cache cleanup interval in seconds")
+    private int cacheCleanupIntervalSeconds = 60;
+
     @CommandLine.Option(names = {"--s3-bucket"}, description = "S3 bucket for committed Lucene files")
     private String s3Bucket;
 
@@ -145,7 +151,14 @@ public class Server implements Callable<Integer> {
                         "server.snapshotRetainLatest", "server.snapshot.retainLatest", "server.snapshot.retain.latest")),
                 optionValue("--etcd-timeout", etcdTimeoutSeconds, () -> config.intValue(etcdTimeoutSeconds,
                         "etcdTimeoutSeconds", "etcd.timeoutSeconds", "etcd.timeout.seconds",
-                        "server.etcdTimeoutSeconds", "server.etcd.timeoutSeconds", "server.etcd.timeout.seconds"))
+                        "server.etcdTimeoutSeconds", "server.etcd.timeoutSeconds", "server.etcd.timeout.seconds")),
+                optionValue("--cache-max-bytes", cacheMaxBytes, () -> config.longValue(cacheMaxBytes,
+                        "cacheMaxBytes", "cache.maxBytes", "cache.max.bytes",
+                        "server.cacheMaxBytes", "server.cache.maxBytes", "server.cache.max.bytes")),
+                optionValue("--cache-cleanup-interval", cacheCleanupIntervalSeconds, () -> config.intValue(cacheCleanupIntervalSeconds,
+                        "cacheCleanupIntervalSeconds", "cache.cleanupIntervalSeconds", "cache.cleanup.interval.seconds",
+                        "server.cacheCleanupIntervalSeconds", "server.cache.cleanupIntervalSeconds",
+                        "server.cache.cleanup.interval.seconds"))
         );
     }
 

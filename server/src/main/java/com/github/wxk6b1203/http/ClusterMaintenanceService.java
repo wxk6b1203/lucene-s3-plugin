@@ -51,7 +51,11 @@ final class ClusterMaintenanceService {
     private final RemoteObjectStore remoteObjectStore;
     private final IndexDataDeleter indexDataDeleter;
     private final int snapshotRetainLatest;
+    private final LocalCacheManager cacheManager;
+    private final Duration cacheCleanupInterval;
     private final Set<String> lifecycleDeletesInProgress = ConcurrentHashMap.newKeySet();
+    private volatile Instant lastCacheCleanup = Instant.EPOCH;
+    private volatile LocalCacheManager.CleanupStats lastCacheCleanupStats = new LocalCacheManager.CleanupStats(0, 0, 0, 0);
 
     ClusterMaintenanceService(
             ClusterStateRepository clusterStateRepository,
@@ -61,7 +65,9 @@ final class ClusterMaintenanceService {
             ManifestMetadataManager manifestMetadataManager,
             RemoteObjectStore remoteObjectStore,
             int snapshotRetainLatest,
-            IndexDataDeleter indexDataDeleter
+            IndexDataDeleter indexDataDeleter,
+            LocalCacheManager cacheManager,
+            Duration cacheCleanupInterval
     ) {
         this.clusterStateRepository = clusterStateRepository;
         this.clusterCoordinator = clusterCoordinator;
@@ -71,12 +77,23 @@ final class ClusterMaintenanceService {
         this.remoteObjectStore = remoteObjectStore;
         this.snapshotRetainLatest = snapshotRetainLatest;
         this.indexDataDeleter = indexDataDeleter;
+        this.cacheManager = cacheManager;
+        this.cacheCleanupInterval = cacheCleanupInterval == null || cacheCleanupInterval.isNegative()
+                ? Duration.ofMinutes(1)
+                : cacheCleanupInterval;
+        this.lastCacheCleanupStats = new LocalCacheManager.CleanupStats(
+                0,
+                cacheManager == null ? 0 : cacheManager.maxBytes(),
+                0,
+                0
+        );
     }
 
     void tick() {
         retryOwnedShardUploads();
         runSnapshotGarbageCollection();
         runLifecyclePolicies();
+        runLocalCacheCleanup();
     }
 
     Map<String, Object> uploadStatus(String indexFilter) throws IOException {
@@ -87,6 +104,17 @@ final class ClusterMaintenanceService {
         ClusterState state = clusterStateRepository.current();
         retryOwnedShardUploads(state, indexFilter);
         return uploadStatus(clusterStateRepository.current(), indexFilter);
+    }
+
+    Map<String, Object> cacheStatus() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("enabled", cacheManager != null && cacheManager.enabled());
+        result.put("last_cleanup_time", lastCacheCleanup.equals(Instant.EPOCH) ? null : lastCacheCleanup.toString());
+        result.put("total_bytes", lastCacheCleanupStats.totalBytes());
+        result.put("max_bytes", lastCacheCleanupStats.maxBytes());
+        result.put("last_deleted_files", lastCacheCleanupStats.deletedFiles());
+        result.put("last_deleted_bytes", lastCacheCleanupStats.deletedBytes());
+        return result;
     }
 
     void retryOwnedShardUploads() {
@@ -278,6 +306,18 @@ final class ClusterMaintenanceService {
                 lifecycleDeletesInProgress.remove(indexName);
             }
         });
+    }
+
+    private void runLocalCacheCleanup() {
+        if (cacheManager == null || !cacheManager.enabled()) {
+            return;
+        }
+        Instant now = Instant.now();
+        if (Duration.between(lastCacheCleanup, now).compareTo(cacheCleanupInterval) < 0) {
+            return;
+        }
+        lastCacheCleanup = now;
+        lastCacheCleanupStats = cacheManager.cleanup();
     }
 
     private String physicalIndexName(String indexName, int shard) {

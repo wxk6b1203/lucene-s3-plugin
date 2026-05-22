@@ -67,6 +67,10 @@ public class ManifestManager implements AutoCloseable {
         return metadataManager.latestSnapshot(indexName);
     }
 
+    public IndexCommitSnapshot snapshot(String indexName, long generation) {
+        return metadataManager.snapshot(indexName, generation);
+    }
+
     public void pinSnapshot(String indexName, long generation, String pinId, long expiresAtMillis) {
         metadataManager.pinSnapshot(indexName, generation, pinId, expiresAtMillis);
     }

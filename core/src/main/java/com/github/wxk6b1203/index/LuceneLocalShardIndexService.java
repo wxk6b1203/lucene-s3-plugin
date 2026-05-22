@@ -154,7 +154,12 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 }
             }
         }
-        try (S3CachingDirectory directory = openShardDirectory(shardId);
+        try (S3CachingDirectory directory = openShardDirectory(
+                shardId,
+                remoteSnapshotStatuses(),
+                false,
+                request.remoteSnapshotGeneration()
+        );
              DirectoryReader reader = DirectoryReader.open(directory)) {
             return searchReader(reader, request, started);
         } catch (IndexNotFoundException e) {
@@ -659,6 +664,12 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         }
     }
 
+    @Override
+    public int openPointInTimeCount() {
+        cleanupExpiredPits();
+        return pits.size();
+    }
+
     private void discardPendingUploads(ShardId shardId) {
         try (ManifestManager manifestManager = openManifestManager()) {
             manifestManager.discardPendingUploads(physicalIndexName(shardId));
@@ -689,13 +700,23 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             List<IndexFileStatus> readableRemoteStatuses,
             boolean includeWalFiles
     ) throws IOException {
+        return openShardDirectory(shardId, readableRemoteStatuses, includeWalFiles, null);
+    }
+
+    private S3CachingDirectory openShardDirectory(
+            ShardId shardId,
+            List<IndexFileStatus> readableRemoteStatuses,
+            boolean includeWalFiles,
+            Long remoteSnapshotGeneration
+    ) throws IOException {
         String physicalIndexName = physicalIndexName(shardId);
         return new S3CachingDirectory(
                 new S3DirectoryOptions(basePath, physicalIndexName),
                 new S3LockFactory(),
                 openManifestManager(),
                 readableRemoteStatuses,
-                includeWalFiles
+                includeWalFiles,
+                remoteSnapshotGeneration
         );
     }
 

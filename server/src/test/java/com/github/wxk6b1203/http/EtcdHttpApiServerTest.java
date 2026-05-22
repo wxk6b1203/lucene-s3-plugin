@@ -155,12 +155,11 @@ public class EtcdHttpApiServerTest {
                     "routing", routing
             ), 200);
             assertEquals("deleted=1", delete.get("status"));
-            Map<String, Object> afterDelete = post(node3, "/books/_search", Map.of(
+            waitUntil(() -> hitIds(post(node3, "/books/_search", Map.of(
                     "query", Map.of("term", Map.of("category", "remote-bulk")),
                     "routing", routing,
                     "size", 10
-            ), 200);
-            assertTrue(hitIds(afterDelete).isEmpty());
+            ), 200)).isEmpty());
         } finally {
             closeServers();
             deletePrefix(client, namespace);

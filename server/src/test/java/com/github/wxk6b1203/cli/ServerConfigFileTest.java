@@ -38,6 +38,9 @@ class ServerConfigFileTest {
                     timeoutSeconds: 7
                   data:
                     path: data/yaml-node
+                  cache:
+                    maxBytes: 1048576
+                    cleanupIntervalSeconds: 30
                   s3:
                     bucket: yaml-bucket
                     region: us-east-1
@@ -64,6 +67,8 @@ class ServerConfigFileTest {
         assertEquals("yaml/ns", options.etcdNamespace());
         assertEquals(7, options.etcdTimeoutSeconds());
         assertEquals("data/yaml-node", options.dataPath());
+        assertEquals(1048576, options.cacheMaxBytes());
+        assertEquals(30, options.cacheCleanupIntervalSeconds());
         assertEquals("yaml-bucket", options.s3Bucket());
         assertEquals("us-east-1", options.s3Region());
         assertEquals("http", options.s3Protocol());
@@ -86,7 +91,8 @@ class ServerConfigFileTest {
                     "bucket": "json-bucket",
                     "chunkedEncoding": true
                   },
-                  "snapshotRetainLatest": 4
+                  "snapshotRetainLatest": 4,
+                  "cacheMaxBytes": 2048
                 }
                 """);
 
@@ -96,7 +102,9 @@ class ServerConfigFileTest {
                 "-p", "9400",
                 "--s3-bucket", "cli-bucket",
                 "--no-s3-chunked-encoding",
-                "--etcd-timeout", "6"
+                "--etcd-timeout", "6",
+                "--cache-max-bytes", "4096",
+                "--cache-cleanup-interval", "45"
         );
         ServerOptions options = command.options();
 
@@ -107,5 +115,7 @@ class ServerConfigFileTest {
         assertEquals(false, options.s3ChunkedEncoding());
         assertEquals(4, options.snapshotRetainLatest());
         assertEquals(6, options.etcdTimeoutSeconds());
+        assertEquals(4096, options.cacheMaxBytes());
+        assertEquals(45, options.cacheCleanupIntervalSeconds());
     }
 }

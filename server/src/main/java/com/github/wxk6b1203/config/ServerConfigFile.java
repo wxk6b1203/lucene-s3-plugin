@@ -78,6 +78,17 @@ public class ServerConfigFile {
         return Integer.parseInt(value.toString().trim());
     }
 
+    public long longValue(long defaultValue, String... aliases) {
+        Object value = value(aliases);
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        return Long.parseLong(value.toString().trim());
+    }
+
     public boolean booleanValue(boolean defaultValue, String... aliases) {
         Object value = value(aliases);
         if (value == null) {
