@@ -53,6 +53,9 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--etcd-timeout"}, description = "ETCD operation timeout in seconds for startup and metadata requests")
     private int etcdTimeoutSeconds = 10;
 
+    @CommandLine.Option(names = {"--http-forward-timeout"}, description = "Internal HTTP forwarding timeout in seconds")
+    private int httpForwardTimeoutSeconds = 10;
+
     @CommandLine.Option(names = {"--data-path"}, description = "Local data/cache path")
     private String dataPath = "data";
 
@@ -91,6 +94,12 @@ public class Server implements Callable<Integer> {
 
     @CommandLine.Option(names = {"--snapshot-retain-latest"}, description = "Number of latest commit snapshot generations retained per shard")
     private int snapshotRetainLatest = 2;
+
+    @CommandLine.Option(names = {"--upload-wait-strategy"}, description = "Write upload wait strategy: async or wait_for_upload")
+    private String uploadWaitStrategy = "async";
+
+    @CommandLine.Option(names = {"--upload-wait-timeout"}, description = "Timeout in seconds when upload wait strategy waits for committed files")
+    private int uploadWaitTimeoutSeconds = 30;
 
     @Override
     public Integer call() {
@@ -161,6 +170,17 @@ public class Server implements Callable<Integer> {
                 optionValue("--etcd-timeout", etcdTimeoutSeconds, () -> config.intValue(etcdTimeoutSeconds,
                         "etcdTimeoutSeconds", "etcd.timeoutSeconds", "etcd.timeout.seconds",
                         "server.etcdTimeoutSeconds", "server.etcd.timeoutSeconds", "server.etcd.timeout.seconds")),
+                optionValue("--http-forward-timeout", httpForwardTimeoutSeconds, () -> config.intValue(httpForwardTimeoutSeconds,
+                        "httpForwardTimeoutSeconds", "http.forwardTimeoutSeconds", "http.forward.timeout.seconds",
+                        "server.httpForwardTimeoutSeconds", "server.http.forwardTimeoutSeconds",
+                        "server.http.forward.timeout.seconds")),
+                optionValue("--upload-wait-strategy", uploadWaitStrategy, () -> config.stringValue(uploadWaitStrategy,
+                        "uploadWaitStrategy", "upload.waitStrategy", "upload.wait.strategy",
+                        "server.uploadWaitStrategy", "server.upload.waitStrategy", "server.upload.wait.strategy")),
+                optionValue("--upload-wait-timeout", uploadWaitTimeoutSeconds, () -> config.intValue(uploadWaitTimeoutSeconds,
+                        "uploadWaitTimeoutSeconds", "upload.waitTimeoutSeconds", "upload.wait.timeout.seconds",
+                        "server.uploadWaitTimeoutSeconds", "server.upload.waitTimeoutSeconds",
+                        "server.upload.wait.timeout.seconds")),
                 optionValue("--cache-max-bytes", cacheMaxBytes, () -> config.longValue(cacheMaxBytes,
                         "cacheMaxBytes", "cache.maxBytes", "cache.max.bytes",
                         "server.cacheMaxBytes", "server.cache.maxBytes", "server.cache.max.bytes")),

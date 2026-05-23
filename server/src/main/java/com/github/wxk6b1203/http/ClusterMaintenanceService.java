@@ -54,6 +54,8 @@ final class ClusterMaintenanceService {
     private final LocalCacheManager cacheManager;
     private final Duration cacheCleanupInterval;
     private final Set<String> lifecycleDeletesInProgress = ConcurrentHashMap.newKeySet();
+    private final Set<String> lifecycleForceMergesInProgress = ConcurrentHashMap.newKeySet();
+    private final Set<String> lifecycleForceMergesCompleted = ConcurrentHashMap.newKeySet();
     private volatile Instant lastCacheCleanup = Instant.EPOCH;
     private volatile LocalCacheManager.CleanupStats lastCacheCleanupStats = new LocalCacheManager.CleanupStats(0, 0, 0, 0);
 
@@ -269,9 +271,6 @@ final class ClusterMaintenanceService {
     }
 
     private void runLifecyclePolicies() {
-        if (!clusterCoordinator.isMaster()) {
-            return;
-        }
         ClusterState state;
         try {
             state = clusterStateRepository.current();
@@ -280,12 +279,55 @@ final class ClusterMaintenanceService {
             return;
         }
         Instant now = Instant.now();
+        runWarmLifecyclePolicies(state, now);
+        if (!clusterCoordinator.isMaster()) {
+            return;
+        }
+        runDeleteLifecyclePolicies(state, now);
+    }
+
+    private void runWarmLifecyclePolicies(ClusterState state, Instant now) {
+        state.routingTable().stream()
+                .filter(routing -> routing.state() == ShardState.STARTED)
+                .filter(routing -> localNode.id().equals(routing.nodeId()))
+                .forEach(routing -> runWarmLifecyclePolicy(state, now, routing));
+    }
+
+    private void runWarmLifecyclePolicy(ClusterState state, Instant now, ShardRouting routing) {
+        var settings = state.indices().get(routing.shardId().indexName());
+        if (settings == null) {
+            return;
+        }
+        IndexLifecyclePolicy policy = lifecyclePolicy(state, settings.lifecyclePolicy());
+        if (policy == null) {
+            return;
+        }
+        Long warmAgeMillis = policy.minAgeMillisByPhase().get(LifecyclePhase.WARM);
+        if (warmAgeMillis == null) {
+            return;
+        }
+        long indexAgeMillis = Math.max(0, Duration.between(settings.createdAt(), now).toMillis());
+        if (indexAgeMillis < warmAgeMillis) {
+            return;
+        }
+        String key = routing.shardId().routeKey() + "/" + routing.ownerTerm() + "/" + routing.allocationEpoch();
+        if (lifecycleForceMergesCompleted.contains(key) || !lifecycleForceMergesInProgress.add(key)) {
+            return;
+        }
+        try {
+            localShardIndexService.forceMerge(routing.shardId(), 1);
+            lifecycleForceMergesCompleted.add(key);
+            log.info("force-merged shard {} by warm lifecycle policy {}", routing.shardId().routeKey(), policy.name());
+        } catch (Exception e) {
+            log.warn("failed to force-merge shard {} by warm lifecycle policy {}", routing.shardId().routeKey(), policy.name(), e);
+        } finally {
+            lifecycleForceMergesInProgress.remove(key);
+        }
+    }
+
+    private void runDeleteLifecyclePolicies(ClusterState state, Instant now) {
         state.indices().forEach((indexName, settings) -> {
-            String policyName = settings.lifecyclePolicy();
-            if (policyName == null || policyName.isBlank()) {
-                return;
-            }
-            IndexLifecyclePolicy policy = state.lifecyclePolicies().get(policyName);
+            IndexLifecyclePolicy policy = lifecyclePolicy(state, settings.lifecyclePolicy());
             if (policy == null) {
                 return;
             }
@@ -299,13 +341,20 @@ final class ClusterMaintenanceService {
             }
             try {
                 indexDataDeleter.deleteIndexAndData(indexName, settings.numberOfShards());
-                log.info("deleted index {} by lifecycle policy {}", indexName, policyName);
+                log.info("deleted index {} by lifecycle policy {}", indexName, policy.name());
             } catch (Exception e) {
-                log.warn("failed to delete index {} by lifecycle policy {}", indexName, policyName, e);
+                log.warn("failed to delete index {} by lifecycle policy {}", indexName, policy.name(), e);
             } finally {
                 lifecycleDeletesInProgress.remove(indexName);
             }
         });
+    }
+
+    private IndexLifecyclePolicy lifecyclePolicy(ClusterState state, String policyName) {
+        if (policyName == null || policyName.isBlank()) {
+            return null;
+        }
+        return state.lifecyclePolicies().get(policyName);
     }
 
     private void runLocalCacheCleanup() {

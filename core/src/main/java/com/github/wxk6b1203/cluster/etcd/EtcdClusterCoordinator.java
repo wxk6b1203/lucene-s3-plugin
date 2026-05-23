@@ -3,6 +3,7 @@ package com.github.wxk6b1203.cluster.etcd;
 import com.github.wxk6b1203.cluster.BalancedShardAllocator;
 import com.github.wxk6b1203.cluster.ClusterCoordinator;
 import com.github.wxk6b1203.cluster.ClusterNode;
+import com.github.wxk6b1203.cluster.ClusterState;
 import com.github.wxk6b1203.cluster.ClusterStateRepository;
 import com.github.wxk6b1203.cluster.NodeRole;
 import com.github.wxk6b1203.cluster.ShardAllocator;
@@ -18,7 +19,10 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -43,8 +47,11 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
             Thread.ofVirtual().name("cluster-coordinator-", 0).factory()
     );
     private final AtomicBoolean master = new AtomicBoolean(false);
+    private final long rebalanceFallbackIntervalNanos;
     private long nodeLeaseId;
     private long masterLeaseId;
+    private RebalanceFingerprint lastRebalanceFingerprint;
+    private long lastRebalanceNanos;
 
     @Data
     @Builder
@@ -76,6 +83,8 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
         this.operationTimeoutSeconds = Math.max(1, options.operationTimeoutSeconds);
         this.masterEligible = localNode.roles().contains(NodeRole.MASTER);
         this.shardAllocator = new BalancedShardAllocator();
+        this.rebalanceFallbackIntervalNanos = Duration.ofSeconds(Math.max(heartbeatTtlSeconds, masterTtlSeconds) * 2)
+                .toNanos();
     }
 
     @Override
@@ -117,11 +126,34 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
                 campaignMaster();
             }
             if (masterEligible && master.get()) {
-                stateRepository.update(state -> shardAllocator.rebalance(state));
+                rebalanceIfNeeded();
             }
         } catch (Exception e) {
             log.warn("cluster coordinator tick failed", e);
         }
+    }
+
+    private void rebalanceIfNeeded() throws IOException {
+        ClusterState state = stateRepository.current();
+        RebalanceFingerprint fingerprint = rebalanceFingerprint(state);
+        long now = System.nanoTime();
+        if (Objects.equals(lastRebalanceFingerprint, fingerprint)
+                && lastRebalanceNanos > 0
+                && now - lastRebalanceNanos < rebalanceFallbackIntervalNanos) {
+            return;
+        }
+        ClusterState updated = stateRepository.update(current -> shardAllocator.rebalance(current));
+        lastRebalanceFingerprint = rebalanceFingerprint(updated);
+        lastRebalanceNanos = now;
+    }
+
+    static RebalanceFingerprint rebalanceFingerprint(ClusterState state) {
+        List<String> dataNodeIds = state.nodes().values().stream()
+                .filter(node -> node.roles().contains(NodeRole.DATA))
+                .map(ClusterNode::id)
+                .sorted()
+                .toList();
+        return new RebalanceFingerprint(state.version(), dataNodeIds);
     }
 
     private void heartbeat() throws Exception {
@@ -244,6 +276,9 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
             current = current.getCause();
         }
         return false;
+    }
+
+    record RebalanceFingerprint(long clusterStateVersion, List<String> dataNodeIds) {
     }
 
     @Override

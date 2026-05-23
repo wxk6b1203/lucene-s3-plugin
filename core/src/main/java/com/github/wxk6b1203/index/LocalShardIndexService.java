@@ -52,6 +52,9 @@ public interface LocalShardIndexService extends AutoCloseable {
 
     ByQueryResponse deleteByQuery(ShardId shardId, ByQueryRequest request) throws IOException;
 
+    default void forceMerge(ShardId shardId, int maxNumSegments) throws IOException {
+    }
+
     void deleteIndex(String indexName, int numberOfShards) throws IOException;
 
     void retryPendingUploads(Collection<ShardId> shardIds) throws IOException;

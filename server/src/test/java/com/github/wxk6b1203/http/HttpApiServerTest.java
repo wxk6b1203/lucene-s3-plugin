@@ -595,11 +595,64 @@ class HttpApiServerTest {
         assertEquals("deleted=1", delete.get("status"));
     }
 
+    @Test
+    @Timeout(60)
+    void httpSearchSupportsByteVectorKnn() throws Exception {
+        startServer();
+        put("/byte_books", Map.of(
+                "number_of_shards", 1,
+                "mappings", Map.of("properties", Map.of(
+                        "category", Map.of("type", "keyword"),
+                        "byte_embedding", Map.of(
+                                "type", "byte_vector",
+                                "dimension", 4,
+                                "similarity", "cosine"
+                        )
+                ))
+        ), 200);
+        post("/byte_books/_doc/doc-1", Map.of(
+                "category", "left",
+                "byte_embedding", List.of(10, 0, 0, 0)
+        ), 201);
+        post("/byte_books/_doc/doc-2", Map.of(
+                "category", "right",
+                "byte_embedding", List.of(0, 10, 0, 0)
+        ), 201);
+
+        Map<String, Object> response = post("/byte_books/_search", Map.of(
+                "knn", Map.of(
+                        "field", "byte_embedding",
+                        "query_vector", List.of(10, 0, 0, 0),
+                        "k", 1,
+                        "num_candidates", 10
+                )
+        ), 200);
+        assertEquals(List.of("doc-1"), hitIds(response));
+    }
+
+    @Test
+    @Timeout(60)
+    void uploadWaitStrategyMakesStrongReadVisibleAfterWriteReturns() throws Exception {
+        startServer(2, "wait_for_upload");
+        createBooksIndex();
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+
+        Map<String, Object> response = post("/books/_search?read_preference=strong", Map.of(
+                "query", Map.of("term", Map.of("category", "visible")),
+                "size", 10
+        ), 200);
+        assertEquals(List.of("doc-1"), hitIds(response));
+    }
+
     private void startServer() throws Exception {
         startServer(2);
     }
 
     private void startServer(int snapshotRetainLatest) throws Exception {
+        startServer(snapshotRetainLatest, "async");
+    }
+
+    private void startServer(int snapshotRetainLatest, String uploadWaitStrategy) throws Exception {
         port = freePort();
         server = new HttpApiServer(new ServerOptions(
                 port,
@@ -616,9 +669,17 @@ class HttpApiServerTest {
                 "https",
                 null,
                 false,
+                false,
                 null,
                 null,
-                snapshotRetainLatest
+                snapshotRetainLatest,
+                10,
+                10,
+                uploadWaitStrategy,
+                5,
+                0,
+                60,
+                0
         ));
         server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
     }

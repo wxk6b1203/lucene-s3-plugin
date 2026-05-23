@@ -24,12 +24,20 @@ public record ServerOptions(
         String s3SecretKey,
         int snapshotRetainLatest,
         int etcdTimeoutSeconds,
+        int httpForwardTimeoutSeconds,
+        String uploadWaitStrategy,
+        int uploadWaitTimeoutSeconds,
         long cacheMaxBytes,
         int cacheCleanupIntervalSeconds,
         int metricsPort
 ) {
     public ServerOptions {
         etcdTimeoutSeconds = Math.max(1, etcdTimeoutSeconds);
+        httpForwardTimeoutSeconds = Math.max(1, httpForwardTimeoutSeconds);
+        uploadWaitStrategy = uploadWaitStrategy == null || uploadWaitStrategy.isBlank()
+                ? "async"
+                : uploadWaitStrategy.trim();
+        uploadWaitTimeoutSeconds = Math.max(1, uploadWaitTimeoutSeconds);
         cacheMaxBytes = Math.max(0, cacheMaxBytes);
         cacheCleanupIntervalSeconds = Math.max(1, cacheCleanupIntervalSeconds);
         metricsPort = Math.max(0, metricsPort);
@@ -74,6 +82,9 @@ public record ServerOptions(
                 s3SecretKey,
                 snapshotRetainLatest,
                 10,
+                10,
+                "async",
+                30,
                 0,
                 60,
                 0
@@ -120,6 +131,9 @@ public record ServerOptions(
                 s3SecretKey,
                 snapshotRetainLatest,
                 etcdTimeoutSeconds,
+                10,
+                "async",
+                30,
                 0,
                 60,
                 0
@@ -168,6 +182,9 @@ public record ServerOptions(
                 s3SecretKey,
                 snapshotRetainLatest,
                 etcdTimeoutSeconds,
+                10,
+                "async",
+                30,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
                 0
@@ -217,6 +234,9 @@ public record ServerOptions(
                 s3SecretKey,
                 snapshotRetainLatest,
                 etcdTimeoutSeconds,
+                10,
+                "async",
+                30,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
                 metricsPort

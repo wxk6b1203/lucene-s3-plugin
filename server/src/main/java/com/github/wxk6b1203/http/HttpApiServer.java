@@ -15,6 +15,7 @@ import com.github.wxk6b1203.search.*;
 import com.github.wxk6b1203.store.directory.RemoteCacheStats;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import com.github.wxk6b1203.store.manifest.ManifestOptions;
+import com.github.wxk6b1203.store.manifest.UploadWaitStrategy;
 import com.github.wxk6b1203.store.object.LocalFileRemoteObjectStore;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
 import com.github.wxk6b1203.store.object.S3RemoteObjectStore;
@@ -82,6 +83,7 @@ public class HttpApiServer implements AutoCloseable {
     private final RemoteObjectStore remoteObjectStore;
     private final ClusterMaintenanceService maintenanceService;
     private final ServerMetrics serverMetrics;
+    private final Duration forwardTimeout;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
     private final AtomicBoolean maintenanceRunning = new AtomicBoolean();
     private Long maintenanceTimerId;
@@ -113,6 +115,7 @@ public class HttpApiServer implements AutoCloseable {
     public HttpApiServer(ServerOptions options) {
         this.vertx = Vertx.vertx();
         this.port = options.httpPort();
+        this.forwardTimeout = Duration.ofSeconds(options.httpForwardTimeoutSeconds());
         Set<NodeRole> roles = ensureCoordinatingRole(options.roles());
         this.localNode = new ClusterNode(
                 options.nodeId(),
@@ -175,7 +178,12 @@ public class HttpApiServer implements AutoCloseable {
                 dataPath,
                 options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
                 this.manifestMetadataManager,
-                this.remoteObjectStore
+                this.remoteObjectStore,
+                new ManifestOptions(
+                        options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
+                        UploadWaitStrategy.parse(options.uploadWaitStrategy()),
+                        Duration.ofSeconds(options.uploadWaitTimeoutSeconds())
+                )
         );
         this.maintenanceService = new ClusterMaintenanceService(
                 clusterStateRepository,
@@ -2048,8 +2056,8 @@ public class HttpApiServer implements AutoCloseable {
         if (mapping == null) {
             throw new IllegalArgumentException("knn field is not mapped: " + vector.field());
         }
-        if (!mapping.denseVector()) {
-            throw new IllegalArgumentException("knn field is not a dense_vector: " + vector.field());
+        if (!mapping.denseVector() && !mapping.byteVector()) {
+            throw new IllegalArgumentException("knn field is not a vector field: " + vector.field());
         }
         if (!Boolean.TRUE.equals(mapping.indexed())) {
             throw new IllegalArgumentException("knn field is not indexed: " + vector.field());
@@ -2183,13 +2191,13 @@ public class HttpApiServer implements AutoCloseable {
         HttpRequest.Builder request = HttpRequest.newBuilder()
                 .uri(URI.create("http://" + host + ":" + port + uri))
                 .version(HttpClient.Version.HTTP_1_1)
-                .timeout(Duration.ofSeconds(10))
+                .timeout(forwardTimeout)
                 .method(method, publisher);
         if (body != null) {
             request.header("content-type", "application/json");
         }
         forwardingClient.sendAsync(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-                .orTimeout(10, TimeUnit.SECONDS)
+                .orTimeout(forwardTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .whenComplete((response, throwable) -> runOnRequestContext(requestContext, () -> {
                     if (throwable != null) {
                         Throwable cause = throwable.getCause() == null ? throwable : throwable.getCause();
@@ -2220,7 +2228,7 @@ public class HttpApiServer implements AutoCloseable {
         HttpRequest.Builder request = HttpRequest.newBuilder()
                 .uri(URI.create("http://" + targetHost + ":" + targetPort + context.request().uri()))
                 .version(HttpClient.Version.HTTP_1_1)
-                .timeout(Duration.ofSeconds(10))
+                .timeout(forwardTimeout)
                 .method(context.request().method().name(), publisher)
                 .header(FORWARDED_HEADER, localNode.id());
         context.request().headers().forEach(header -> {
@@ -2232,7 +2240,7 @@ public class HttpApiServer implements AutoCloseable {
         log.debug("forward request node={} target={} address={}:{} uri={} extraHeaders={}",
                 localNode.id(), targetNodeId, targetHost, targetPort, context.request().uri(), extraHeaders.keySet());
         forwardingClient.sendAsync(request.build(), HttpResponse.BodyHandlers.ofByteArray())
-                .orTimeout(10, TimeUnit.SECONDS)
+                .orTimeout(forwardTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .whenComplete((response, throwable) -> runOnRequestContext(requestContext, () -> {
                     if (throwable != null) {
                         Throwable cause = throwable.getCause() == null ? throwable : throwable.getCause();

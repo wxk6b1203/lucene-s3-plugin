@@ -34,14 +34,19 @@ import java.time.format.DateTimeParseException;
 import java.util.Base64;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private static final int UPDATE_BY_QUERY_BATCH_SIZE = 512;
 
     private final Path basePath;
     private final String bucket;
+    private final ManifestOptions manifestOptions;
     private final ManifestMetadataManager metadataManager;
     private final RemoteObjectStore remoteObjectStore;
+    private final ExecutorService uploadWorkerPool;
     private final Map<ShardId, ShardWriter> writers = new ConcurrentHashMap<>();
     private final Map<String, PitContext> pits = new ConcurrentHashMap<>();
 
@@ -51,10 +56,22 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             ManifestMetadataManager metadataManager,
             RemoteObjectStore remoteObjectStore
     ) {
+        this(basePath, bucket, metadataManager, remoteObjectStore, new ManifestOptions(bucket));
+    }
+
+    public LuceneLocalShardIndexService(
+            Path basePath,
+            String bucket,
+            ManifestMetadataManager metadataManager,
+            RemoteObjectStore remoteObjectStore,
+            ManifestOptions manifestOptions
+    ) {
         this.basePath = basePath;
         this.bucket = bucket;
+        this.manifestOptions = manifestOptions == null ? new ManifestOptions(bucket) : manifestOptions;
         this.metadataManager = metadataManager;
         this.remoteObjectStore = remoteObjectStore;
+        this.uploadWorkerPool = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("upload-worker-", 0).factory());
     }
 
     @Override
@@ -682,6 +699,15 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     @Override
+    public void forceMerge(ShardId shardId, int maxNumSegments) throws IOException {
+        ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
+        synchronized (shardWriter) {
+            shardWriter.writer.forceMerge(Math.max(1, maxNumSegments));
+            shardWriter.writer.commit();
+        }
+    }
+
+    @Override
     public void deleteIndex(String indexName, int numberOfShards) throws IOException {
         IOException failure = null;
         for (String pitId : List.copyOf(pits.keySet())) {
@@ -807,7 +833,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private ManifestManager openManifestManager() {
-        return new ManifestManager(new ManifestOptions(bucket), remoteObjectStore, metadataManager);
+        return new ManifestManager(manifestOptions, remoteObjectStore, metadataManager, uploadWorkerPool);
     }
 
     private List<IndexFileStatus> remoteSnapshotStatuses() {
@@ -2039,6 +2065,15 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
         }
         writers.clear();
+        uploadWorkerPool.shutdown();
+        try {
+            if (!uploadWorkerPool.awaitTermination(30, TimeUnit.SECONDS)) {
+                uploadWorkerPool.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            uploadWorkerPool.shutdownNow();
+        }
         if (failure != null) {
             throw failure;
         }

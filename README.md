@@ -204,6 +204,7 @@ Windows 使用：
 | `--host` | `127.0.0.1` | 对外发布的 host，跨节点转发会使用它。 |
 | `--roles` | `MASTER,DATA,COORDINATING` | 逗号分隔角色，可选 `MASTER`,`DATA`,`INGEST`,`COORDINATING`。服务会自动补充 coordinating 能力。 |
 | `--metrics-port` | `0` | Prometheus metrics 独立 HTTP 端口。`0` 表示关闭。 |
+| `--http-forward-timeout` | `10` | 节点间内部 HTTP 转发超时时间，单位秒。 |
 | `--etcd-endpoints` | 空 | etcd endpoint，例如 `http://127.0.0.1:2379`。为空时使用单节点内存元数据。 |
 | `--etcd-namespace` | `lucene-s3/cluster` | etcd 中保存集群状态和 manifest 元数据的 namespace。 |
 | `--etcd-timeout` | `10` | etcd 启动和元数据操作超时时间，单位秒。启动阶段超过该时间会失败退出。 |
@@ -218,6 +219,8 @@ Windows 使用：
 | `--s3-content-md5` | `false` | 是否启用 legacy `Content-MD5` header。阿里云 OSS 等 S3 兼容服务如果要求 `DeleteObjects` 带 `Content-MD5`，可打开该选项。 |
 | `--s3-access-key` | 空 | S3 access key。未指定时走 AWS SDK 默认凭证链。 |
 | `--s3-secret-key` | 空 | S3 secret key。未指定时走 AWS SDK 默认凭证链。 |
+| `--upload-wait-strategy` | `async` | 写入提交后的远端上传等待策略。`async` 表示 Lucene 本地 commit 后返回；`wait_for_upload` 表示等待本次 commit 文件上传并发布 clean snapshot 后返回。 |
+| `--upload-wait-timeout` | `30` | `wait_for_upload` 等待上传和 snapshot 发布的超时时间，单位秒。 |
 | `--snapshot-retain-latest` | `2` | 每个 shard 至少保留的最新 commit snapshot generation 数。PIT pin 住的 generation 会额外保留。 |
 
 YAML 示例：
@@ -226,6 +229,7 @@ YAML 示例：
 server:
   http:
     port: 9200
+    forwardTimeoutSeconds: 10
   cluster:
     name: lucene-s3
   node:
@@ -244,6 +248,9 @@ server:
   cache:
     maxBytes: 10737418240
     cleanupIntervalSeconds: 60
+  upload:
+    waitStrategy: async
+    waitTimeoutSeconds: 30
   s3:
     bucket: lucene-s3-dev
     region: us-east-1
@@ -341,6 +348,7 @@ curl -X PUT http://127.0.0.1:9200/books \
 - `long`, `integer`, `double`, `float`: 数值查询、排序、聚合。
 - `boolean`: 布尔查询、排序、聚合。
 - `dense_vector`: 向量检索字段，需要 `dimension` 或 `dims`，可选 `similarity`。
+- `byte_vector`: byte 向量检索字段，需要 `dimension` 或 `dims`，可选 `similarity`。
 
 字段参数：
 
@@ -622,7 +630,12 @@ curl -X PUT http://127.0.0.1:9200/books/_ilm/policy/delete-old \
   -d '{}'
 ```
 
-当前后台执行器主要实现 delete phase：到期后删除 index metadata、本地 shard 数据、远端对象和 manifest metadata。`min_age` 支持 `ms`, `s`, `m`, `h`, `d` 或毫秒数。
+当前后台执行器支持：
+
+- `warm` phase：到期后由当前 shard owner 对本地 shard 执行一次 `forceMerge(1)` 并提交。
+- `delete` phase：到期后删除 index metadata、本地 shard 数据、远端对象和 manifest metadata。
+
+`min_age` 支持 `ms`, `s`, `m`, `h`, `d` 或毫秒数。`hot`、`cold`、`frozen` phase 当前可配置但不执行额外动作。
 
 ### 调试接口
 

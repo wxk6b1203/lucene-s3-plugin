@@ -28,27 +28,53 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Slf4j
 public class ManifestManager implements AutoCloseable {
     private static final Set<UploadKey> IN_FLIGHT_UPLOADS = ConcurrentHashMap.newKeySet();
 
+    private final ManifestOptions options;
     private final RemoteObjectStore remoteObjectStore;
     private final ManifestMetadataManager metadataManager;
-    private final ExecutorService uploadWorkerPool;
+    private final boolean closeUploadWorkerPool;
+    private ExecutorService uploadWorkerPool;
 
     public ManifestManager(ManifestOptions options, S3Client s3Client, ManifestMetadataManager metadataManager) {
         this(options, s3Client == null ? null : new S3RemoteObjectStore(options.bucket(), s3Client), metadataManager);
     }
 
     public ManifestManager(ManifestOptions options, RemoteObjectStore remoteObjectStore, ManifestMetadataManager metadataManager) {
+        this(options, remoteObjectStore, metadataManager, null, true);
+    }
+
+    public ManifestManager(
+            ManifestOptions options,
+            RemoteObjectStore remoteObjectStore,
+            ManifestMetadataManager metadataManager,
+            ExecutorService uploadWorkerPool
+    ) {
+        this(options, remoteObjectStore, metadataManager, uploadWorkerPool, false);
+    }
+
+    private ManifestManager(
+            ManifestOptions options,
+            RemoteObjectStore remoteObjectStore,
+            ManifestMetadataManager metadataManager,
+            ExecutorService uploadWorkerPool,
+            boolean closeUploadWorkerPool
+    ) {
+        this.options = options == null ? new ManifestOptions("") : options;
         this.remoteObjectStore = remoteObjectStore;
         this.metadataManager = metadataManager;
-        this.uploadWorkerPool = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("upload-worker-", 0).factory());
+        this.uploadWorkerPool = uploadWorkerPool;
+        this.closeUploadWorkerPool = closeUploadWorkerPool;
     }
 
     public List<IndexFileMetadata> listAll(String indexName, List<IndexFileStatus> statuses) {
@@ -120,9 +146,18 @@ public class ManifestManager implements AutoCloseable {
         }
         SnapshotCommit snapshotCommit = snapshotCommit(snapshotIndexName, snapshotFileNames, commitFiles);
         if (!pendingUploads.isEmpty()) {
-            uploadWorkerPool.execute(() -> uploadCommit(pendingUploads, snapshotCommit));
+            CompletableFuture<Boolean> upload = CompletableFuture.supplyAsync(
+                    () -> uploadCommit(pendingUploads, snapshotCommit),
+                    uploadWorkerPool()
+            );
+            if (options.uploadWaitStrategy() == UploadWaitStrategy.WAIT_FOR_UPLOAD) {
+                waitForUpload(upload, snapshotCommit);
+            }
         } else {
-            publishSnapshotIfClean(snapshotCommit);
+            boolean published = publishSnapshotIfClean(snapshotCommit);
+            if (options.uploadWaitStrategy() == UploadWaitStrategy.WAIT_FOR_UPLOAD && !published) {
+                throw new IOException("commit snapshot was not published: " + snapshotCommit.indexName());
+            }
         }
     }
 
@@ -250,7 +285,7 @@ public class ManifestManager implements AutoCloseable {
                 && Objects.equals(metadata.getObjectKey(), file.objectKey());
     }
 
-    private void uploadCommit(List<PendingUpload> pendingUploads, SnapshotCommit snapshotCommit) {
+    private boolean uploadCommit(List<PendingUpload> pendingUploads, SnapshotCommit snapshotCommit) {
         boolean dataFilesUploaded = true;
         for (PendingUpload pendingUpload : pendingUploads) {
             if (!isCommittedSegmentFile(pendingUpload.metadata().getName())) {
@@ -258,20 +293,22 @@ public class ManifestManager implements AutoCloseable {
             }
         }
         if (!dataFilesUploaded) {
-            return;
+            return false;
         }
+        boolean segmentFilesUploaded = true;
         for (PendingUpload pendingUpload : pendingUploads) {
             if (isCommittedSegmentFile(pendingUpload.metadata().getName())) {
-                upload(pendingUpload.source(), pendingUpload.metadata());
+                segmentFilesUploaded &= upload(pendingUpload.source(), pendingUpload.metadata());
             }
         }
-        publishSnapshotIfClean(snapshotCommit);
+        return segmentFilesUploaded && publishSnapshotIfClean(snapshotCommit);
     }
 
     private boolean upload(Path source, IndexFileMetadata metadata) {
         UploadKey uploadKey = new UploadKey(metadata.getObjectKey(), metadata.getEpoch());
-        if (!IN_FLIGHT_UPLOADS.add(uploadKey)) {
-            return false;
+        if (!acquireUploadSlot(uploadKey, metadata)) {
+            IndexFileMetadata current = metadataManager.fileMetadata(metadata.getIndexName(), metadata.getName());
+            return sameMetadataIdentity(metadata, current) && remoteReadable(current.getStatus());
         }
         try {
             ensureRemoteObjectStore();
@@ -311,6 +348,26 @@ public class ManifestManager implements AutoCloseable {
         }
     }
 
+    private boolean acquireUploadSlot(UploadKey uploadKey, IndexFileMetadata metadata) {
+        long deadlineNanos = System.nanoTime() + options.uploadWaitTimeout().toNanos();
+        while (!IN_FLIGHT_UPLOADS.add(uploadKey)) {
+            IndexFileMetadata current = metadataManager.fileMetadata(metadata.getIndexName(), metadata.getName());
+            if (sameMetadataIdentity(metadata, current) && remoteReadable(current.getStatus())) {
+                return false;
+            }
+            if (System.nanoTime() >= deadlineNanos) {
+                return false;
+            }
+            try {
+                TimeUnit.MILLISECONDS.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
+    }
+
     private boolean sameMetadataIdentity(IndexFileMetadata expected, IndexFileMetadata current) {
         return current != null
                 && current.getEpoch() == expected.getEpoch()
@@ -343,24 +400,61 @@ public class ManifestManager implements AutoCloseable {
         return new SnapshotCommit(snapshotIndexName, new LinkedHashSet<>(snapshotFileNames));
     }
 
-    private void publishSnapshotIfClean(SnapshotCommit snapshotCommit) {
+    private boolean publishSnapshotIfClean(SnapshotCommit snapshotCommit) {
         if (snapshotCommit.indexName() == null || snapshotCommit.fileNames().isEmpty()) {
-            return;
+            return true;
         }
         Map<String, IndexFileMetadata> files = new HashMap<>();
         String indexName = snapshotCommit.indexName();
         for (String fileName : snapshotCommit.fileNames()) {
             IndexFileMetadata metadata = metadataManager.fileMetadata(indexName, fileName);
             if (metadata == null || !remoteReadable(metadata.getStatus())) {
-                return;
+                return false;
             }
             files.put(metadata.getName(), copy(metadata));
         }
         IndexFileMetadata segment = latestCommittedSegmentFile(files.values());
         if (segment == null) {
-            return;
+            return false;
         }
         metadataManager.publishSnapshot(segment.getIndexName(), segment.getName(), new ArrayList<>(files.values()));
+        return true;
+    }
+
+    private void waitForUpload(CompletableFuture<Boolean> upload, SnapshotCommit snapshotCommit) throws IOException {
+        long deadlineNanos = System.nanoTime() + options.uploadWaitTimeout().toNanos();
+        try {
+            boolean published = upload.get(options.uploadWaitTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            if (!published && !waitForSnapshot(snapshotCommit, deadlineNanos)) {
+                throw new IOException("commit upload did not publish a clean snapshot: " + snapshotCommit.indexName());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("interrupted while waiting for commit upload: " + snapshotCommit.indexName(), e);
+        } catch (TimeoutException e) {
+            throw new IOException("timed out waiting for commit upload: " + snapshotCommit.indexName(), e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw new IOException("failed while waiting for commit upload: " + snapshotCommit.indexName(), cause);
+        }
+    }
+
+    private boolean waitForSnapshot(SnapshotCommit snapshotCommit, long deadlineNanos) {
+        while (System.nanoTime() < deadlineNanos) {
+            if (publishSnapshotIfClean(snapshotCommit)) {
+                return true;
+            }
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return publishSnapshotIfClean(snapshotCommit);
     }
 
     private IndexFileMetadata latestCommittedSegmentFile(Collection<IndexFileMetadata> files) {
@@ -423,6 +517,13 @@ public class ManifestManager implements AutoCloseable {
         return name.startsWith("segments_") && !name.startsWith("pending_segments_");
     }
 
+    private synchronized ExecutorService uploadWorkerPool() {
+        if (uploadWorkerPool == null) {
+            uploadWorkerPool = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("upload-worker-", 0).factory());
+        }
+        return uploadWorkerPool;
+    }
+
     private record PendingUpload(Path source, IndexFileMetadata metadata) {
     }
 
@@ -437,6 +538,9 @@ public class ManifestManager implements AutoCloseable {
 
     @Override
     public void close() {
+        if (uploadWorkerPool == null || !closeUploadWorkerPool) {
+            return;
+        }
         this.uploadWorkerPool.shutdown();
         try {
             this.uploadWorkerPool.awaitTermination(30, TimeUnit.SECONDS);
