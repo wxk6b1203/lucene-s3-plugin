@@ -296,10 +296,12 @@ curl http://127.0.0.1:9200/_cluster/health
 curl http://127.0.0.1:9200/_nodes
 curl http://127.0.0.1:9200/_nodes/stats
 curl http://127.0.0.1:9200/_shards
+curl http://127.0.0.1:9200/_indices
+curl http://127.0.0.1:9200/books
 curl http://127.0.0.1:9200/_snapshot_status
 ```
 
-`/_cluster/health` 汇总 master、节点数、active shards、pending/stuck uploads 和 cluster state version。`/_shards` 展示每个 shard 的 owner、owner term、routing allocation epoch、远端 snapshot generation 和 pending uploads。`/_nodes/stats` 当前返回本节点的 PIT 数、remote cache 命中率、缓存清理状态和 S3 操作/错误计数。
+`/_cluster/health` 汇总 master、节点数、active shards、pending/stuck uploads 和 cluster state version。`/_shards` 展示每个 shard 的 owner、owner term、routing allocation epoch、远端 snapshot generation 和 pending uploads。`/_indices` 展示索引级状态、shard 汇总、mapping 字段数、ILM 绑定和删除 tombstone 状态；`/:index` 返回单个索引详情和 mappings。`/_nodes/stats` 当前返回本节点的 PIT 数、remote cache 命中率、缓存清理状态和 S3 操作/错误计数。
 
 如果启动时设置了 `--metrics-port 9300`，Prometheus 可抓取独立端口上的指标，避免 metrics scrape 被主 HTTP API 的 Lucene/IO 请求阻塞：
 

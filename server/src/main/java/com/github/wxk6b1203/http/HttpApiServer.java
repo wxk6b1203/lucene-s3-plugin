@@ -317,6 +317,7 @@ public class HttpApiServer implements AutoCloseable {
         router.get("/_nodes").blockingHandler(this::nodes, false);
         router.get("/_nodes/stats").blockingHandler(this::nodeStats, false);
         router.get("/_shards").blockingHandler(this::shards, false);
+        router.get("/_indices").blockingHandler(this::indices, false);
         router.get("/_snapshot_status").blockingHandler(this::snapshotStatus, false);
         router.get("/_uploads").blockingHandler(this::uploadStatus, false);
         router.post("/_uploads/_retry").blockingHandler(this::retryUploads, false);
@@ -324,6 +325,7 @@ public class HttpApiServer implements AutoCloseable {
         router.delete("/_pit").blockingHandler(this::closePointInTime, false);
         router.put("/:index").blockingHandler(this::createIndex, false);
         router.delete("/:index").blockingHandler(this::deleteIndex, false);
+        router.get("/:index").blockingHandler(this::getIndex, false);
         router.get("/:index/_uploads").blockingHandler(this::uploadStatus, false);
         router.post("/:index/_uploads/_retry").blockingHandler(this::retryUploads, false);
         router.get("/:index/_mapping").blockingHandler(this::getMapping, false);
@@ -429,6 +431,22 @@ public class HttpApiServer implements AutoCloseable {
         }
     }
 
+    private void indices(RoutingContext context) {
+        try {
+            ClusterState state = clusterStateRepository.current();
+            List<Map<String, Object>> indices = state.indices().entrySet().stream()
+                    .sorted(Map.Entry.comparingByKey())
+                    .map(entry -> indexStats(state, entry.getKey(), entry.getValue(), false))
+                    .toList();
+            json(context, 200, Map.of(
+                    "cluster_state_version", state.version(),
+                    "indices", indices
+            ));
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
     private void snapshotStatus(RoutingContext context) {
         try {
             json(context, 200, maintenanceService.uploadStatus(context.queryParams().get("index")));
@@ -470,14 +488,7 @@ public class HttpApiServer implements AutoCloseable {
         ClusterNode owner = state.nodes().get(routing.nodeId());
         IndexCommitSnapshot snapshot = latestRemoteSnapshot(shardId);
         String physicalIndexName = physicalIndexName(shardId);
-        long pendingUploads = manifestMetadataManager.listAll(physicalIndexName, List.of(
-                        IndexFileStatus.DIRTY,
-                        IndexFileStatus.UPLOADING
-                ))
-                .stream()
-                .filter(metadata -> metadata.getStatus() == IndexFileStatus.DIRTY
-                        || metadata.getStatus() == IndexFileStatus.UPLOADING)
-                .count();
+        long pendingUploads = pendingUploadCount(physicalIndexName);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("index", shardId.indexName());
         result.put("shard", shardId.shardNumber());
@@ -492,6 +503,82 @@ public class HttpApiServer implements AutoCloseable {
         result.put("remote_snapshot_ready", remoteSnapshotReady(shardId, snapshot));
         result.put("pending_uploads", pendingUploads);
         return result;
+    }
+
+    private Map<String, Object> indexStats(
+            ClusterState state,
+            String indexName,
+            IndexSettings settings,
+            boolean includeMappings
+    ) {
+        List<ShardRouting> routings = state.routingTable().stream()
+                .filter(routing -> routing.shardId().indexName().equals(indexName))
+                .sorted(Comparator.comparingInt(routing -> routing.shardId().shardNumber()))
+                .toList();
+        long started = 0;
+        long ownerUnavailable = 0;
+        long remoteSnapshotReady = 0;
+        long pendingUploads = 0;
+        for (ShardRouting routing : routings) {
+            if (routing.state() == ShardState.STARTED) {
+                started++;
+            }
+            if (routing.state() == ShardState.STARTED
+                    && (routing.nodeId() == null || !state.nodes().containsKey(routing.nodeId()))) {
+                ownerUnavailable++;
+            }
+            ShardId shardId = routing.shardId();
+            IndexCommitSnapshot snapshot = latestRemoteSnapshot(shardId);
+            if (remoteSnapshotReady(shardId, snapshot)) {
+                remoteSnapshotReady++;
+            }
+            pendingUploads += pendingUploadCount(physicalIndexName(shardId));
+        }
+        long missingRouting = Math.max(0, settings.numberOfShards() - routings.size());
+        long unassigned = routings.size() - started + missingRouting;
+        boolean routingMismatch = routings.size() != settings.numberOfShards();
+        String status = "green";
+        if (settings.deletePending() || routingMismatch || unassigned > 0 || ownerUnavailable > 0) {
+            status = "red";
+        } else if (pendingUploads > 0) {
+            status = "yellow";
+        }
+
+        Map<String, Object> shardSummary = new LinkedHashMap<>();
+        shardSummary.put("total", settings.numberOfShards());
+        shardSummary.put("routing_entries", routings.size());
+        shardSummary.put("routing_mismatch", routingMismatch);
+        shardSummary.put("started", started);
+        shardSummary.put("unassigned", unassigned);
+        shardSummary.put("owner_unavailable", ownerUnavailable);
+        shardSummary.put("remote_snapshot_ready", remoteSnapshotReady);
+        shardSummary.put("pending_uploads", pendingUploads);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("name", indexName);
+        result.put("status", status);
+        result.put("number_of_shards", settings.numberOfShards());
+        result.put("lifecycle_policy", settings.lifecyclePolicy());
+        result.put("created_at", settings.createdAt());
+        result.put("delete_pending", settings.deletePending());
+        result.put("delete_started_at", settings.deleteStartedAt());
+        result.put("mapping_fields", settings.mappings().size());
+        result.put("shards", shardSummary);
+        if (includeMappings) {
+            result.put("mappings", Map.of("properties", settings.mappings()));
+        }
+        return result;
+    }
+
+    private long pendingUploadCount(String physicalIndexName) {
+        return manifestMetadataManager.listAll(physicalIndexName, List.of(
+                        IndexFileStatus.DIRTY,
+                        IndexFileStatus.UPLOADING
+                ))
+                .stream()
+                .filter(metadata -> metadata.getStatus() == IndexFileStatus.DIRTY
+                        || metadata.getStatus() == IndexFileStatus.UPLOADING)
+                .count();
     }
 
     private void uploadStatus(RoutingContext context) {
@@ -602,6 +689,20 @@ public class HttpApiServer implements AutoCloseable {
             }
             ClusterState state = deleteIndexAndData(index, settings.numberOfShards());
             json(context, 200, state);
+        } catch (Exception e) {
+            error(context, status(e), e);
+        }
+    }
+
+    private void getIndex(RoutingContext context) {
+        try {
+            String index = context.pathParam("index");
+            ClusterState state = clusterStateRepository.current();
+            IndexSettings settings = state.indices().get(index);
+            if (settings == null) {
+                throw new IllegalArgumentException("index not found: " + index);
+            }
+            json(context, 200, Map.of(index, indexStats(state, index, settings, true)));
         } catch (Exception e) {
             error(context, status(e), e);
         }

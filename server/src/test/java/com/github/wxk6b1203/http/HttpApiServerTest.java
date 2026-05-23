@@ -324,6 +324,25 @@ class HttpApiServerTest {
         assertTrue(shardRows.stream().allMatch(row -> row.containsKey("owner_node")));
         assertTrue(shardRows.stream().anyMatch(row -> row.get("latest_snapshot_generation") != null));
 
+        Map<String, Object> indices = get("/_indices", 200);
+        List<Map<String, Object>> indexRows = (List<Map<String, Object>>) indices.get("indices");
+        assertEquals(1, indexRows.size());
+        Map<String, Object> booksIndex = indexRows.getFirst();
+        assertEquals("books", booksIndex.get("name"));
+        assertEquals("green", booksIndex.get("status"));
+        assertEquals(2, ((Number) booksIndex.get("number_of_shards")).intValue());
+        assertEquals(3, ((Number) booksIndex.get("mapping_fields")).intValue());
+        Map<String, Object> indexShardSummary = (Map<String, Object>) booksIndex.get("shards");
+        assertEquals(2, ((Number) indexShardSummary.get("total")).intValue());
+        assertEquals(2, ((Number) indexShardSummary.get("started")).intValue());
+
+        Map<String, Object> indexDetail = get("/books", 200);
+        Map<String, Object> booksDetail = (Map<String, Object>) indexDetail.get("books");
+        Map<String, Object> mappings = (Map<String, Object>) booksDetail.get("mappings");
+        Map<String, Object> properties = (Map<String, Object>) mappings.get("properties");
+        Map<String, Object> category = (Map<String, Object>) properties.get("category");
+        assertEquals("keyword", category.get("type"));
+
         Map<String, Object> snapshotStatus = get("/_snapshot_status", 200);
         Map<String, Object> snapshotSummary = (Map<String, Object>) snapshotStatus.get("summary");
         assertEquals(0, ((Number) snapshotSummary.get("stuck_shards")).intValue());
@@ -504,6 +523,7 @@ class HttpApiServerTest {
         startServer();
 
         assertEquals(404, status("GET", "/missing/_mapping", null));
+        assertEquals(404, status("GET", "/missing", null));
         assertEquals(404, status("POST", "/missing/_search", Map.of(
                 "query", Map.of("match_all", Map.of())
         )));
