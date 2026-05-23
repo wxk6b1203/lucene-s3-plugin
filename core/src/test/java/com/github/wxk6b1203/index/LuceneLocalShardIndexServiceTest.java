@@ -672,6 +672,229 @@ public class LuceneLocalShardIndexServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    public void testExtendedMappedFieldsAreSearchable() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.ofEntries(
+                Map.entry("published_at", new FieldMapping("date", null, null, true, true)),
+                Map.entry("client_ip", new FieldMapping("ip", null, null, true, true)),
+                Map.entry("payload", new FieldMapping("binary", null, null, true, true)),
+                Map.entry("location", new FieldMapping("geo_point", null, null, true, true)),
+                Map.entry("page_span", new FieldMapping("long_range", null, null, true, true)),
+                Map.entry("score_span", new FieldMapping("double_range", null, null, true, true)),
+                Map.entry("ip_span", new FieldMapping("ip_range", null, null, true, true)),
+                Map.entry("tags", new FieldMapping("keyword", null, null, true, true, true, true)),
+                Map.entry("ratings", new FieldMapping("long", null, null, true, true, true, true)),
+                Map.entry("boosts", new FieldMapping("double", null, null, true, true, true, true)),
+                Map.entry("byte_embedding", new FieldMapping("byte_vector", 4, "cosine", true, true))
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.ofEntries(
+                    Map.entry("published_at", "2026-05-23T10:00:00Z"),
+                    Map.entry("client_ip", "192.168.1.10"),
+                    Map.entry("payload", "aGVsbG8="),
+                    Map.entry("location", Map.of("lat", 31.2304, "lon", 121.4737)),
+                    Map.entry("page_span", Map.of("gte", 10, "lte", 20)),
+                    Map.entry("score_span", List.of(1.5, 2.5)),
+                    Map.entry("ip_span", Map.of("gte", "192.168.1.0", "lte", "192.168.1.255")),
+                    Map.entry("tags", List.of("search", "lucene")),
+                    Map.entry("ratings", List.of(5, 4)),
+                    Map.entry("boosts", List.of(-2.0, 5.5)),
+                    Map.entry("byte_embedding", List.of(1, 2, 3, 4))
+            ), mappings));
+            service.index(new IndexDocumentRequest("books", shardId, "doc-2", Map.ofEntries(
+                    Map.entry("published_at", "2025-01-01T08:00:00+08:00"),
+                    Map.entry("client_ip", "10.0.0.1"),
+                    Map.entry("payload", "d29ybGQ="),
+                    Map.entry("location", Map.of("lat", 39.9042, "lon", 116.4074)),
+                    Map.entry("page_span", Map.of("gte", 100, "lte", 200)),
+                    Map.entry("score_span", List.of(9.0, 10.0)),
+                    Map.entry("ip_span", Map.of("gte", "10.0.0.0", "lte", "10.0.0.255")),
+                    Map.entry("tags", List.of("storage")),
+                    Map.entry("ratings", List.of(2)),
+                    Map.entry("boosts", List.of(-10.0, 7.0)),
+                    Map.entry("byte_embedding", List.of(4, 3, 2, 1))
+            ), mappings));
+
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("term", Map.of("client_ip", "192.168.1.10")), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("term", Map.of("payload", "aGVsbG8=")), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("range", Map.of("published_at", Map.of("gte", "2026-01-01"))), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("range", Map.of("client_ip", Map.of("gte", "192.168.1.0", "lte", "192.168.1.255"))), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("range", Map.of("page_span", Map.of("gte", 15, "lte", 16))), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("range", Map.of("score_span", Map.of("gte", 2.0, "lte", 2.1))), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("range", Map.of("ip_span", Map.of("gte", "192.168.1.20", "lte", "192.168.1.30"))), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of(
+                            "geo_distance",
+                            Map.of("distance", "2km", "location", Map.of("lat", 31.2304, "lon", 121.4737))
+                    ), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of(
+                            "geo_bounding_box",
+                            Map.of("location", Map.of("top", 31.3, "bottom", 31.2, "left", 121.4, "right", 121.6))
+                    ), List.of(), null, null, 0, 10, mappings)
+            ).hits().getFirst().id());
+
+            var sorted = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            List.of(Map.of("published_at", Map.of("order", "asc"))),
+                            mappings
+                    )
+            );
+            assertEquals("doc-2", sorted.hits().getFirst().id());
+
+            var vector = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(),
+                            new VectorQuery("byte_embedding", List.of(1f, 2f, 3f, 4f), 1, 10),
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals("doc-1", vector.hits().getFirst().id());
+
+            var filteredVector = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("term", Map.of("tags", "storage")),
+                            List.of(),
+                            new VectorQuery("byte_embedding", List.of(1f, 2f, 3f, 4f), 1, 10),
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals("doc-2", filteredVector.hits().getFirst().id());
+
+            assertEquals("doc-1", service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            List.of(Map.of("tags", Map.of("order", "asc"))),
+                            mappings
+                    )
+            ).hits().getFirst().id());
+            assertEquals("doc-2", service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            List.of(Map.of("ratings", Map.of("order", "asc"))),
+                            mappings
+                    )
+            ).hits().getFirst().id());
+            assertEquals("doc-2", service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            List.of(Map.of("boosts", Map.of("order", "desc"))),
+                            mappings
+                    )
+            ).hits().getFirst().id());
+
+            var aggregation = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(
+                                    Map.of("name", "by_tag", "terms", Map.of("field", "tags")),
+                                    Map.of("name", "rating_count", "value_count", Map.of("field", "ratings"))
+                            ),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            Map<String, Object> byTag = (Map<String, Object>) aggregation.aggregations().get("by_tag");
+            List<Map<String, Object>> buckets = (List<Map<String, Object>>) byTag.get("buckets");
+            Map<String, Object> ratingCount = (Map<String, Object>) aggregation.aggregations().get("rating_count");
+            assertTrue(buckets.stream().anyMatch(bucket -> "search".equals(bucket.get("key"))));
+            assertEquals(3L, ratingCount.get("count"));
+            assertEquals(3L, ratingCount.get("value"));
+
+            assertThrows(IllegalArgumentException.class, () -> service.index(new IndexDocumentRequest(
+                    "books",
+                    shardId,
+                    "doc-bad-date",
+                    Map.of("published_at", "not-a-date"),
+                    mappings
+            )));
+            assertThrows(IllegalArgumentException.class, () -> service.index(new IndexDocumentRequest(
+                    "books",
+                    shardId,
+                    "doc-bad-ip",
+                    Map.of("client_ip", "example.com"),
+                    mappings
+            )));
+        }
+    }
+
+    @Test
     public void testSearchCanSortByMappedSourceField() throws Exception {
         MemMockProvider metadata = new MemMockProvider();
         ShardId shardId = new ShardId("books", 0);

@@ -20,9 +20,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
@@ -79,10 +81,8 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
     @Override
     public void start() throws IOException {
         try {
-            this.nodeLeaseId = await(client.getLeaseClient().grant(heartbeatTtlSeconds)).getID();
-            if (masterEligible) {
-                this.masterLeaseId = await(client.getLeaseClient().grant(masterTtlSeconds)).getID();
-            }
+            grantNodeLease();
+            grantMasterLeaseIfEligible();
             heartbeat();
             if (masterEligible) {
                 campaignMaster();
@@ -125,13 +125,13 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
     }
 
     private void heartbeat() throws Exception {
-        await(client.getLeaseClient().keepAliveOnce(nodeLeaseId));
+        keepAliveNodeLease();
         repository.putNode(touch(localNode), nodeLeaseId);
     }
 
     private void campaignMaster() throws Exception {
         try {
-            await(client.getLeaseClient().keepAliveOnce(masterLeaseId));
+            keepAliveMasterLease();
             ByteSequence masterKey = key("master");
             ByteSequence value = ByteSequence.from(localNode.id().getBytes(StandardCharsets.UTF_8));
             PutOption putOption = PutOption.builder().withLeaseId(masterLeaseId).build();
@@ -153,6 +153,50 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
         } catch (Exception e) {
             master.set(false);
             throw e;
+        }
+    }
+
+    private void keepAliveNodeLease() throws Exception {
+        try {
+            if (nodeLeaseId == 0) {
+                grantNodeLease();
+                return;
+            }
+            await(client.getLeaseClient().keepAliveOnce(nodeLeaseId));
+        } catch (Exception e) {
+            if (!leaseNotFound(e)) {
+                throw e;
+            }
+            log.warn("node heartbeat lease was lost; granting a new lease for node {}", localNode.id());
+            grantNodeLease();
+        }
+    }
+
+    private void keepAliveMasterLease() throws Exception {
+        try {
+            if (masterLeaseId == 0) {
+                grantMasterLeaseIfEligible();
+                return;
+            }
+            await(client.getLeaseClient().keepAliveOnce(masterLeaseId));
+        } catch (Exception e) {
+            if (!leaseNotFound(e)) {
+                throw e;
+            }
+            master.set(false);
+            log.warn("master lease was lost; granting a new lease before campaigning node={}", localNode.id());
+            masterLeaseId = 0;
+            grantMasterLeaseIfEligible();
+        }
+    }
+
+    private void grantNodeLease() throws Exception {
+        this.nodeLeaseId = await(client.getLeaseClient().grant(heartbeatTtlSeconds)).getID();
+    }
+
+    private void grantMasterLeaseIfEligible() throws Exception {
+        if (masterEligible) {
+            this.masterLeaseId = await(client.getLeaseClient().grant(masterTtlSeconds)).getID();
         }
     }
 
@@ -183,6 +227,23 @@ public class EtcdClusterCoordinator implements ClusterCoordinator {
 
     private <T> T await(CompletableFuture<T> future) throws Exception {
         return future.get(operationTimeoutSeconds, TimeUnit.SECONDS);
+    }
+
+    static boolean leaseNotFound(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && message.toLowerCase().contains("requested lease not found")) {
+                return true;
+            }
+            if ((current instanceof ExecutionException || current instanceof TimeoutException)
+                    && current.getCause() != null) {
+                current = current.getCause();
+                continue;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     @Override

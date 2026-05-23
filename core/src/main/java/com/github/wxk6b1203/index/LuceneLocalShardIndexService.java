@@ -18,13 +18,20 @@ import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.search.*;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.NumericUtils;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
+import java.util.Base64;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -458,10 +465,13 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             throw new IllegalArgumentException("search_after sort field is not mapped: " + field);
         }
         if (mapping.longNumber()) {
-            return value instanceof Number number ? number.longValue() : Long.valueOf(String.valueOf(value));
+            return requiredLong(value, field);
+        }
+        if (mapping.date()) {
+            return requiredDate(value, field, mapping);
         }
         if (mapping.doubleNumber()) {
-            return value instanceof Number number ? number.doubleValue() : Double.valueOf(String.valueOf(value));
+            return requiredDouble(value, field);
         }
         return new BytesRef(String.valueOf(value));
     }
@@ -580,12 +590,38 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             throw new IllegalArgumentException("sort field requires doc_values: " + field);
         }
         if (mapping.keyword() || mapping.bool()) {
+            if (mapping.multiValued()) {
+                return new SortedSetSortField(
+                        field,
+                        descending,
+                        descending ? SortedSetSelector.Type.MAX : SortedSetSelector.Type.MIN,
+                        SortField.STRING_LAST
+                );
+            }
             return new SortField(field, SortField.Type.STRING, descending, SortField.STRING_LAST);
         }
-        if (mapping.longNumber()) {
+        if (mapping.longNumber() || mapping.date()) {
+            if (mapping.multiValued()) {
+                return new SortedNumericSortField(
+                        field,
+                        SortField.Type.LONG,
+                        descending,
+                        descending ? SortedNumericSelector.Type.MAX : SortedNumericSelector.Type.MIN,
+                        descending ? Long.MIN_VALUE : Long.MAX_VALUE
+                );
+            }
             return new SortField(field, SortField.Type.LONG, descending, descending ? Long.MIN_VALUE : Long.MAX_VALUE);
         }
         if (mapping.doubleNumber()) {
+            if (mapping.multiValued()) {
+                return new SortedNumericSortField(
+                        field,
+                        SortField.Type.DOUBLE,
+                        descending,
+                        descending ? SortedNumericSelector.Type.MAX : SortedNumericSelector.Type.MIN,
+                        descending ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY
+                );
+            }
             return new SortField(
                     field,
                     SortField.Type.DOUBLE,
@@ -868,12 +904,30 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             document.add(new KnnFloatVectorField(field, vector, similarity(mapping)));
             return;
         }
-        if (mapping.keyword()) {
-            if (Boolean.TRUE.equals(mapping.indexed())) {
-                document.add(new StringField(field, String.valueOf(value), store(mapping)));
+        if (mapping.byteVector() && Boolean.TRUE.equals(mapping.indexed())) {
+            byte[] vector = byteVectorValue(value);
+            if (vector == null) {
+                throw new IllegalArgumentException("byte_vector field must be a non-empty numeric array: " + field);
             }
-            if (Boolean.TRUE.equals(mapping.docValues())) {
-                document.add(new SortedDocValuesField(field, new BytesRef(String.valueOf(value))));
+            if (vector.length != mapping.dimension()) {
+                throw new IllegalArgumentException("byte_vector field dimension mismatch: " + field);
+            }
+            document.add(new KnnByteVectorField(field, vector, similarity(mapping)));
+            return;
+        }
+        if (mapping.keyword()) {
+            for (Object item : values(value, mapping)) {
+                String string = String.valueOf(item);
+                if (Boolean.TRUE.equals(mapping.indexed())) {
+                    document.add(new StringField(field, string, store(mapping)));
+                }
+                if (Boolean.TRUE.equals(mapping.docValues())) {
+                    if (mapping.multiValued()) {
+                        document.add(new SortedSetDocValuesField(field, new BytesRef(string)));
+                    } else {
+                        document.add(new SortedDocValuesField(field, new BytesRef(string)));
+                    }
+                }
             }
             return;
         }
@@ -884,35 +938,148 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             return;
         }
         if (mapping.longNumber()) {
-            Long number = longValue(value);
-            if (number != null) {
+            for (Object item : values(value, mapping)) {
+                Long number = longValue(item);
+                if (number == null) {
+                    continue;
+                }
                 if (Boolean.TRUE.equals(mapping.indexed())) {
                     document.add(new LongPoint(field, number));
                 }
                 if (Boolean.TRUE.equals(mapping.docValues())) {
-                    document.add(new NumericDocValuesField(field, number));
+                    if (mapping.multiValued()) {
+                        document.add(new SortedNumericDocValuesField(field, number));
+                    } else {
+                        document.add(new NumericDocValuesField(field, number));
+                    }
+                }
+                if (Boolean.TRUE.equals(mapping.stored())) {
+                    document.add(new StoredField(field, number));
                 }
             }
             return;
         }
         if (mapping.doubleNumber()) {
-            Double number = doubleValue(value);
-            if (number != null) {
+            for (Object item : values(value, mapping)) {
+                Double number = doubleValue(item);
+                if (number == null) {
+                    continue;
+                }
                 if (Boolean.TRUE.equals(mapping.indexed())) {
                     document.add(new DoublePoint(field, number));
                 }
                 if (Boolean.TRUE.equals(mapping.docValues())) {
-                    document.add(new DoubleDocValuesField(field, number));
+                    if (mapping.multiValued()) {
+                        document.add(new SortedNumericDocValuesField(field, NumericUtils.doubleToSortableLong(number)));
+                    } else {
+                        document.add(new DoubleDocValuesField(field, number));
+                    }
+                }
+                if (Boolean.TRUE.equals(mapping.stored())) {
+                    document.add(new StoredField(field, number));
                 }
             }
             return;
         }
         if (mapping.bool()) {
+            for (Object item : values(value, mapping)) {
+                String string = String.valueOf(booleanValue(item));
+                if (Boolean.TRUE.equals(mapping.indexed())) {
+                    document.add(new StringField(field, string, store(mapping)));
+                }
+                if (Boolean.TRUE.equals(mapping.docValues())) {
+                    if (mapping.multiValued()) {
+                        document.add(new SortedSetDocValuesField(field, new BytesRef(string)));
+                    } else {
+                        document.add(new SortedDocValuesField(field, new BytesRef(string)));
+                    }
+                }
+            }
+            return;
+        }
+        if (mapping.date()) {
+            for (Object item : values(value, mapping)) {
+                Long epoch = requiredDate(item, field, mapping);
+                if (Boolean.TRUE.equals(mapping.indexed())) {
+                    document.add(new LongPoint(field, epoch));
+                }
+                if (Boolean.TRUE.equals(mapping.docValues())) {
+                    if (mapping.multiValued()) {
+                        document.add(new SortedNumericDocValuesField(field, epoch));
+                    } else {
+                        document.add(new NumericDocValuesField(field, epoch));
+                    }
+                }
+                if (Boolean.TRUE.equals(mapping.stored())) {
+                    document.add(new StoredField(field, epoch));
+                }
+            }
+            return;
+        }
+        if (mapping.ip()) {
+            for (Object item : values(value, mapping)) {
+                InetAddress address = requiredIp(item, field);
+                if (Boolean.TRUE.equals(mapping.indexed())) {
+                    document.add(new InetAddressPoint(field, address));
+                }
+                if (Boolean.TRUE.equals(mapping.docValues()) && !mapping.multiValued()) {
+                    document.add(new BinaryDocValuesField(field, new BytesRef(InetAddressPoint.encode(address))));
+                }
+                if (Boolean.TRUE.equals(mapping.stored())) {
+                    document.add(new StoredField(field, address.getHostAddress()));
+                }
+            }
+            return;
+        }
+        if (mapping.binary()) {
+            for (Object item : values(value, mapping)) {
+                byte[] bytes = binaryValue(item);
+                if (bytes == null) {
+                    continue;
+                }
+                if (Boolean.TRUE.equals(mapping.indexed())) {
+                    document.add(new BinaryPoint(field, bytes));
+                }
+                if (Boolean.TRUE.equals(mapping.docValues()) && !mapping.multiValued()) {
+                    document.add(new BinaryDocValuesField(field, new BytesRef(bytes)));
+                }
+                if (Boolean.TRUE.equals(mapping.stored())) {
+                    document.add(new StoredField(field, bytes));
+                }
+            }
+            return;
+        }
+        if (mapping.geoPoint()) {
+            double[] point = geoPointValue(value);
+            if (point == null) {
+                return;
+            }
             if (Boolean.TRUE.equals(mapping.indexed())) {
-                document.add(new StringField(field, String.valueOf(value), store(mapping)));
+                document.add(new LatLonPoint(field, point[0], point[1]));
             }
             if (Boolean.TRUE.equals(mapping.docValues())) {
-                document.add(new SortedDocValuesField(field, new BytesRef(String.valueOf(value))));
+                document.add(new LatLonDocValuesField(field, point[0], point[1]));
+            }
+            return;
+        }
+        if (mapping.longRange()) {
+            long[] range = longRangeValue(value, mapping);
+            if (range != null && Boolean.TRUE.equals(mapping.indexed())) {
+                document.add(new LongRange(field, new long[]{range[0]}, new long[]{range[1]}));
+            }
+            return;
+        }
+        if (mapping.doubleRange()) {
+            double[] range = doubleRangeValue(value);
+            if (range != null && Boolean.TRUE.equals(mapping.indexed())) {
+                document.add(new DoubleRange(field, new double[]{range[0]}, new double[]{range[1]}));
+            }
+            return;
+        }
+        if (mapping.ipRange()) {
+            InetAddress[] range = ipRangeValue(value);
+            if (range != null && Boolean.TRUE.equals(mapping.indexed())) {
+                document.add(new InetAddressRange(field, range[0], range[1]));
             }
         }
     }
@@ -978,8 +1145,8 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         FieldMapping mapping = mappings.get(field);
         for (int i = 0; i < docIds.size(); i++) {
             Object value = aggregationValue(searcher, docIds.get(i), field, mapping, sources.get(i));
-            if (value != null) {
-                counts.merge(String.valueOf(value), 1L, Long::sum);
+            for (Object item : aggregationValues(value)) {
+                counts.merge(String.valueOf(item), 1L, Long::sum);
             }
         }
         List<Map<String, Object>> buckets = counts.entrySet().stream()
@@ -1014,14 +1181,16 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         double max = Double.NEGATIVE_INFINITY;
         long count = 0;
         for (int i = 0; i < docIds.size(); i++) {
-            Double value = doubleValue(aggregationValue(searcher, docIds.get(i), field, mapping, sources.get(i)));
-            if (value == null) {
-                continue;
+            for (Object item : aggregationValues(aggregationValue(searcher, docIds.get(i), field, mapping, sources.get(i)))) {
+                Double value = doubleValue(item);
+                if (value == null) {
+                    continue;
+                }
+                sum += value;
+                min = Math.min(min, value);
+                max = Math.max(max, value);
+                count++;
             }
-            sum += value;
-            min = Math.min(min, value);
-            max = Math.max(max, value);
-            count++;
         }
         Object value = switch (type) {
             case "min" -> count == 0 ? null : min;
@@ -1057,6 +1226,9 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private Object docValue(IndexSearcher searcher, int docId, String field, FieldMapping mapping) throws IOException {
+        if (mapping.multiValued()) {
+            return null;
+        }
         LeafReaderContext leaf = leaf(searcher, docId);
         if (leaf == null) {
             return null;
@@ -1069,13 +1241,25 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
             return values.lookupOrd(values.ordValue()).utf8ToString();
         }
-        if (mapping.longNumber()) {
+        if (mapping.longNumber() || mapping.date()) {
             NumericDocValues values = DocValues.getNumeric(leaf.reader(), field);
             return values.advanceExact(leafDocId) ? values.longValue() : null;
         }
         if (mapping.doubleNumber()) {
             NumericDocValues values = DocValues.getNumeric(leaf.reader(), field);
             return values.advanceExact(leafDocId) ? Double.longBitsToDouble(values.longValue()) : null;
+        }
+        if (mapping.ip() || mapping.binary()) {
+            BinaryDocValues values = DocValues.getBinary(leaf.reader(), field);
+            if (!values.advanceExact(leafDocId)) {
+                return null;
+            }
+            BytesRef bytes = values.binaryValue();
+            byte[] copy = Arrays.copyOfRange(bytes.bytes, bytes.offset, bytes.offset + bytes.length);
+            if (mapping.ip()) {
+                return InetAddressPoint.decode(copy).getHostAddress();
+            }
+            return Base64.getEncoder().encodeToString(copy);
         }
         return null;
     }
@@ -1113,8 +1297,22 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         if (mapping == null) {
             throw new IllegalArgumentException("knn field is not mapped: " + request.vector().field());
         }
-        if (!mapping.denseVector()) {
-            throw new IllegalArgumentException("knn field is not a dense_vector: " + request.vector().field());
+        if (!mapping.denseVector() && !mapping.byteVector()) {
+            throw new IllegalArgumentException("knn field is not a vector field: " + request.vector().field());
+        }
+        int k = Math.max(1, request.vector().k());
+        Query filter = filterQuery(request.query(), request.mappings());
+        if (mapping.byteVector()) {
+            byte[] byteTarget = byteVectorValue(request.vector().vector());
+            if (byteTarget == null) {
+                throw new IllegalArgumentException("knn query_vector must be a non-empty byte array");
+            }
+            if (byteTarget.length != mapping.dimension()) {
+                throw new IllegalArgumentException("knn query_vector dimension mismatch: " + request.vector().field());
+            }
+            return filter == null
+                    ? KnnByteVectorField.newVectorQuery(request.vector().field(), byteTarget, k)
+                    : new KnnByteVectorQuery(request.vector().field(), byteTarget, k, filter);
         }
         float[] target = vectorValue(request.vector().vector());
         if (target == null) {
@@ -1123,8 +1321,6 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         if (target.length != mapping.dimension()) {
             throw new IllegalArgumentException("knn query_vector dimension mismatch: " + request.vector().field());
         }
-        int k = Math.max(1, request.vector().k());
-        Query filter = filterQuery(request.query(), request.mappings());
         return filter == null
                 ? new KnnFloatVectorQuery(request.vector().field(), target, k)
                 : new KnnFloatVectorQuery(request.vector().field(), target, k, filter);
@@ -1159,6 +1355,48 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             vector[i] = number.floatValue();
         }
         return vector;
+    }
+
+    private byte[] byteVectorValue(Object value) {
+        if (!(value instanceof List<?> list) || list.isEmpty()) {
+            return null;
+        }
+        byte[] vector = new byte[list.size()];
+        for (int i = 0; i < list.size(); i++) {
+            Object item = list.get(i);
+            if (!(item instanceof Number number)) {
+                return null;
+            }
+            int intValue = number.intValue();
+            if (intValue < Byte.MIN_VALUE || intValue > Byte.MAX_VALUE || number.doubleValue() != intValue) {
+                return null;
+            }
+            vector[i] = (byte) intValue;
+        }
+        return vector;
+    }
+
+    private List<Object> values(Object value, FieldMapping mapping) {
+        if (mapping.multiValued() && value instanceof List<?> list) {
+            return list.stream().filter(Objects::nonNull).map(item -> (Object) item).toList();
+        }
+        return value == null ? List.of() : List.of(value);
+    }
+
+    private List<Object> aggregationValues(Object value) {
+        if (value == null) {
+            return List.of();
+        }
+        if (value instanceof Iterable<?> iterable) {
+            List<Object> values = new ArrayList<>();
+            for (Object item : iterable) {
+                if (item != null) {
+                    values.add(item);
+                }
+            }
+            return values;
+        }
+        return List.of(value);
     }
 
     private Query query(Map<String, Object> query, Map<String, FieldMapping> mappings) {
@@ -1198,7 +1436,15 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 return rangeQuery(String.valueOf(entry.get().getKey()), bounds, mappings);
             }
         }
-        throw new IllegalArgumentException("unsupported query; supported: match_all, ids.values, term, match, range");
+        Object geoDistance = query.get("geo_distance");
+        if (geoDistance instanceof Map<?, ?> distanceMap) {
+            return geoDistanceQuery(distanceMap, mappings);
+        }
+        Object geoBoundingBox = query.get("geo_bounding_box");
+        if (geoBoundingBox instanceof Map<?, ?> boxMap) {
+            return geoBoundingBoxQuery(boxMap, mappings);
+        }
+        throw new IllegalArgumentException("unsupported query; supported: match_all, ids.values, term, match, range, geo_distance, geo_bounding_box");
     }
 
     private Query boolQuery(Map<?, ?> boolMap, Map<String, FieldMapping> mappings) {
@@ -1248,12 +1494,21 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
             return LongPoint.newExactQuery(field, number);
         }
+        if (mapping.date()) {
+            return LongPoint.newExactQuery(field, requiredDate(value, field, mapping));
+        }
         if (mapping.doubleNumber()) {
             Double number = doubleValue(value);
             if (number == null) {
                 throw new IllegalArgumentException("term value must be numeric for field: " + field);
             }
             return DoublePoint.newExactQuery(field, number);
+        }
+        if (mapping.ip()) {
+            return InetAddressPoint.newExactQuery(field, requiredIp(value, field));
+        }
+        if (mapping.binary()) {
+            return BinaryPoint.newExactQuery(field, requiredBinary(value, field));
         }
         throw new IllegalArgumentException("term query is not supported for field: " + field);
     }
@@ -1283,12 +1538,147 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             long max = bounds.containsKey("lt") ? requiredLong(lte, field) - 1 : longOrDefault(lte, Long.MAX_VALUE);
             return LongPoint.newRangeQuery(field, min, max);
         }
+        if (mapping.date()) {
+            long min = bounds.containsKey("gt") ? requiredDate(gte, field, mapping) + 1 : dateOrDefault(gte, Long.MIN_VALUE, mapping);
+            long max = bounds.containsKey("lt") ? requiredDate(lte, field, mapping) - 1 : dateOrDefault(lte, Long.MAX_VALUE, mapping);
+            return LongPoint.newRangeQuery(field, min, max);
+        }
         if (mapping.doubleNumber()) {
             double min = bounds.containsKey("gt") ? DoublePoint.nextUp(requiredDouble(gte, field)) : doubleOrDefault(gte, Double.NEGATIVE_INFINITY);
             double max = bounds.containsKey("lt") ? DoublePoint.nextDown(requiredDouble(lte, field)) : doubleOrDefault(lte, Double.POSITIVE_INFINITY);
             return DoublePoint.newRangeQuery(field, min, max);
         }
-        throw new IllegalArgumentException("range query is only supported for numeric fields: " + field);
+        if (mapping.ip()) {
+            InetAddress min = bounds.containsKey("gt") ? InetAddressPoint.nextUp(requiredIp(gte, field)) : ipOrDefault(gte, InetAddressPoint.MIN_VALUE);
+            InetAddress max = bounds.containsKey("lt") ? InetAddressPoint.nextDown(requiredIp(lte, field)) : ipOrDefault(lte, InetAddressPoint.MAX_VALUE);
+            return InetAddressPoint.newRangeQuery(field, min, max);
+        }
+        if (mapping.longRange()) {
+            long[] range = longRangeValue(bounds, mapping);
+            if (range == null) {
+                throw new IllegalArgumentException("range bound must be a valid range for field: " + field);
+            }
+            return longRangeQuery(field, range, stringValue(bounds.get("relation")));
+        }
+        if (mapping.doubleRange()) {
+            double[] range = doubleRangeValue(bounds);
+            if (range == null) {
+                throw new IllegalArgumentException("range bound must be a valid range for field: " + field);
+            }
+            return doubleRangeQuery(field, range, stringValue(bounds.get("relation")));
+        }
+        if (mapping.ipRange()) {
+            InetAddress[] range = ipRangeValue(bounds);
+            if (range == null) {
+                throw new IllegalArgumentException("range bound must be a valid range for field: " + field);
+            }
+            return ipRangeQuery(field, range, stringValue(bounds.get("relation")));
+        }
+        throw new IllegalArgumentException("range query is not supported for field: " + field);
+    }
+
+    private Query geoDistanceQuery(Map<?, ?> distanceMap, Map<String, FieldMapping> mappings) {
+        String field = stringValue(distanceMap.get("field"));
+        double[] point = null;
+        Object distanceValue = distanceMap.containsKey("distance_meters")
+                ? distanceMap.get("distance_meters")
+                : distanceMap.get("distance");
+        if (field != null && !field.isBlank()) {
+            point = geoPointValue(distanceMap.containsKey("point") ? distanceMap.get("point") : distanceMap);
+        } else {
+            for (Map.Entry<?, ?> entry : distanceMap.entrySet()) {
+                String key = String.valueOf(entry.getKey());
+                if ("distance".equals(key) || "distance_meters".equals(key) || "distanceMeters".equals(key)) {
+                    continue;
+                }
+                FieldMapping mapping = mappings.get(key);
+                if (mapping != null && mapping.geoPoint()) {
+                    field = key;
+                    point = geoPointValue(entry.getValue());
+                    break;
+                }
+            }
+        }
+        if (field == null || field.isBlank() || point == null) {
+            throw new IllegalArgumentException("geo_distance query requires a geo_point field, point, and distance");
+        }
+        FieldMapping mapping = mappings.get(field);
+        if (mapping == null || !mapping.geoPoint()) {
+            throw new IllegalArgumentException("geo_distance field is not mapped as geo_point: " + field);
+        }
+        return LatLonPoint.newDistanceQuery(field, point[0], point[1], distanceMeters(distanceValue));
+    }
+
+    private Query geoBoundingBoxQuery(Map<?, ?> boxMap, Map<String, FieldMapping> mappings) {
+        String field = stringValue(boxMap.get("field"));
+        Map<?, ?> spec = boxMap;
+        if (field == null || field.isBlank()) {
+            for (Map.Entry<?, ?> entry : boxMap.entrySet()) {
+                String key = String.valueOf(entry.getKey());
+                FieldMapping mapping = mappings.get(key);
+                if (mapping != null && mapping.geoPoint() && entry.getValue() instanceof Map<?, ?> valueMap) {
+                    field = key;
+                    spec = valueMap;
+                    break;
+                }
+            }
+        }
+        if (field == null || field.isBlank()) {
+            throw new IllegalArgumentException("geo_bounding_box query requires a geo_point field");
+        }
+        FieldMapping mapping = mappings.get(field);
+        if (mapping == null || !mapping.geoPoint()) {
+            throw new IllegalArgumentException("geo_bounding_box field is not mapped as geo_point: " + field);
+        }
+        Double top = doubleValue(spec.get("top"));
+        Double bottom = doubleValue(spec.get("bottom"));
+        Double left = doubleValue(spec.get("left"));
+        Double right = doubleValue(spec.get("right"));
+        double[] topLeft = geoPointValue(spec.get("top_left"));
+        double[] bottomRight = geoPointValue(spec.get("bottom_right"));
+        if (topLeft != null) {
+            top = topLeft[0];
+            left = topLeft[1];
+        }
+        if (bottomRight != null) {
+            bottom = bottomRight[0];
+            right = bottomRight[1];
+        }
+        if (top == null || bottom == null || left == null || right == null) {
+            throw new IllegalArgumentException("geo_bounding_box query requires top, bottom, left, and right");
+        }
+        return LatLonPoint.newBoxQuery(field, bottom, top, left, right);
+    }
+
+    private Query longRangeQuery(String field, long[] range, String relation) {
+        return switch (normalizeRelation(relation)) {
+            case "contains" -> LongRange.newContainsQuery(field, new long[]{range[0]}, new long[]{range[1]});
+            case "within" -> LongRange.newWithinQuery(field, new long[]{range[0]}, new long[]{range[1]});
+            case "crosses" -> LongRange.newCrossesQuery(field, new long[]{range[0]}, new long[]{range[1]});
+            default -> LongRange.newIntersectsQuery(field, new long[]{range[0]}, new long[]{range[1]});
+        };
+    }
+
+    private Query doubleRangeQuery(String field, double[] range, String relation) {
+        return switch (normalizeRelation(relation)) {
+            case "contains" -> DoubleRange.newContainsQuery(field, new double[]{range[0]}, new double[]{range[1]});
+            case "within" -> DoubleRange.newWithinQuery(field, new double[]{range[0]}, new double[]{range[1]});
+            case "crosses" -> DoubleRange.newCrossesQuery(field, new double[]{range[0]}, new double[]{range[1]});
+            default -> DoubleRange.newIntersectsQuery(field, new double[]{range[0]}, new double[]{range[1]});
+        };
+    }
+
+    private Query ipRangeQuery(String field, InetAddress[] range, String relation) {
+        return switch (normalizeRelation(relation)) {
+            case "contains" -> InetAddressRange.newContainsQuery(field, range[0], range[1]);
+            case "within" -> InetAddressRange.newWithinQuery(field, range[0], range[1]);
+            case "crosses" -> InetAddressRange.newCrossesQuery(field, range[0], range[1]);
+            default -> InetAddressRange.newIntersectsQuery(field, range[0], range[1]);
+        };
+    }
+
+    private String normalizeRelation(String relation) {
+        return relation == null || relation.isBlank() ? "intersects" : relation.trim().toLowerCase();
     }
 
     private Field.Store store(FieldMapping mapping) {
@@ -1296,7 +1686,17 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private Long longValue(Object value) {
-        return value instanceof Number number ? number.longValue() : null;
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof String string && !string.isBlank()) {
+            try {
+                return Long.valueOf(string.trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private long longOrDefault(Object value, long defaultValue) {
@@ -1313,7 +1713,17 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private Double doubleValue(Object value) {
-        return value instanceof Number number ? number.doubleValue() : null;
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (value instanceof String string && !string.isBlank()) {
+            try {
+                return Double.valueOf(string.trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private double doubleOrDefault(Object value, double defaultValue) {
@@ -1327,6 +1737,264 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             throw new IllegalArgumentException("range bound must be numeric for field: " + field);
         }
         return number;
+    }
+
+    private Boolean booleanValue(Object value) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof String string) {
+            return Boolean.parseBoolean(string);
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        return false;
+    }
+
+    private Long dateValue(Object value, FieldMapping mapping) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (!(value instanceof String string) || string.isBlank()) {
+            return null;
+        }
+        String trimmed = string.trim();
+        try {
+            return Long.valueOf(trimmed);
+        } catch (NumberFormatException ignored) {
+        }
+        try {
+            Instant instant = Instant.parse(trimmed);
+            return mapping != null && mapping.dateNanos()
+                    ? Math.addExact(Math.multiplyExact(instant.getEpochSecond(), 1_000_000_000L), instant.getNano())
+                    : instant.toEpochMilli();
+        } catch (DateTimeParseException ignored) {
+        } catch (ArithmeticException e) {
+            return null;
+        }
+        try {
+            Instant instant = OffsetDateTime.parse(trimmed).toInstant();
+            return mapping != null && mapping.dateNanos()
+                    ? Math.addExact(Math.multiplyExact(instant.getEpochSecond(), 1_000_000_000L), instant.getNano())
+                    : instant.toEpochMilli();
+        } catch (DateTimeParseException ignored) {
+        } catch (ArithmeticException e) {
+            return null;
+        }
+        try {
+            Instant instant = LocalDate.parse(trimmed).atStartOfDay(ZoneOffset.UTC).toInstant();
+            return mapping != null && mapping.dateNanos()
+                    ? Math.multiplyExact(instant.getEpochSecond(), 1_000_000_000L)
+                    : instant.toEpochMilli();
+        } catch (DateTimeParseException ignored) {
+            return null;
+        } catch (ArithmeticException e) {
+            return null;
+        }
+    }
+
+    private long dateOrDefault(Object value, long defaultValue, FieldMapping mapping) {
+        Long date = dateValue(value, mapping);
+        return date == null ? defaultValue : date;
+    }
+
+    private long requiredDate(Object value, String field, FieldMapping mapping) {
+        Long date = dateValue(value, mapping);
+        if (date == null) {
+            throw new IllegalArgumentException("date value must be epoch number, ISO instant, or ISO local date for field: " + field);
+        }
+        return date;
+    }
+
+    private InetAddress ipValue(Object value) {
+        if (value instanceof InetAddress address) {
+            return address;
+        }
+        if (!(value instanceof String string) || string.isBlank()) {
+            return null;
+        }
+        try {
+            return InetAddress.ofLiteral(string.trim());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private InetAddress ipOrDefault(Object value, InetAddress defaultValue) {
+        InetAddress address = ipValue(value);
+        return address == null ? defaultValue : address;
+    }
+
+    private InetAddress requiredIp(Object value, String field) {
+        InetAddress address = ipValue(value);
+        if (address == null) {
+            throw new IllegalArgumentException("ip value must be a valid address for field: " + field);
+        }
+        return address;
+    }
+
+    private byte[] binaryValue(Object value) {
+        if (value instanceof byte[] bytes) {
+            return bytes;
+        }
+        if (value instanceof String string && !string.isBlank()) {
+            try {
+                return Base64.getDecoder().decode(string.trim());
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+        if (value instanceof List<?> list && !list.isEmpty()) {
+            byte[] bytes = new byte[list.size()];
+            for (int i = 0; i < list.size(); i++) {
+                Object item = list.get(i);
+                if (!(item instanceof Number number)) {
+                    return null;
+                }
+                int intValue = number.intValue();
+                if (intValue < Byte.MIN_VALUE || intValue > 255 || number.doubleValue() != intValue) {
+                    return null;
+                }
+                bytes[i] = (byte) intValue;
+            }
+            return bytes;
+        }
+        return null;
+    }
+
+    private byte[] requiredBinary(Object value, String field) {
+        byte[] bytes = binaryValue(value);
+        if (bytes == null) {
+            throw new IllegalArgumentException("binary value must be base64 or byte array for field: " + field);
+        }
+        return bytes;
+    }
+
+    private double[] geoPointValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Double lat = doubleValue(map.get("lat"));
+            Double lon = doubleValue(map.containsKey("lon") ? map.get("lon") : map.get("lng"));
+            return lat == null || lon == null ? null : new double[]{lat, lon};
+        }
+        if (value instanceof List<?> list && list.size() == 2) {
+            Double lat = doubleValue(list.get(0));
+            Double lon = doubleValue(list.get(1));
+            return lat == null || lon == null ? null : new double[]{lat, lon};
+        }
+        if (value instanceof String string && !string.isBlank()) {
+            String[] parts = string.split(",");
+            if (parts.length == 2) {
+                Double lat = doubleValue(parts[0].trim());
+                Double lon = doubleValue(parts[1].trim());
+                return lat == null || lon == null ? null : new double[]{lat, lon};
+            }
+        }
+        return null;
+    }
+
+    private double distanceMeters(Object value) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (!(value instanceof String string) || string.isBlank()) {
+            throw new IllegalArgumentException("geo_distance query requires distance");
+        }
+        String trimmed = string.trim().toLowerCase(Locale.ROOT).replace(" ", "");
+        double multiplier = 1.0;
+        if (trimmed.endsWith("km")) {
+            multiplier = 1000.0;
+            trimmed = trimmed.substring(0, trimmed.length() - 2);
+        } else if (trimmed.endsWith("mi")) {
+            multiplier = 1609.344;
+            trimmed = trimmed.substring(0, trimmed.length() - 2);
+        } else if (trimmed.endsWith("m")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        Double distance = doubleValue(trimmed);
+        if (distance == null) {
+            throw new IllegalArgumentException("geo_distance query requires numeric distance");
+        }
+        return distance * multiplier;
+    }
+
+    private long[] longRangeValue(Object value, FieldMapping mapping) {
+        if (value instanceof Map<?, ?> map) {
+            Object minValue = firstPresent(map, "gte", "from", "min", "lower", "gt");
+            Object maxValue = firstPresent(map, "lte", "to", "max", "upper", "lt");
+            long min = mapping != null && "date_range".equals(mapping.type())
+                    ? dateOrDefault(minValue, Long.MIN_VALUE, mapping)
+                    : longOrDefault(minValue, Long.MIN_VALUE);
+            long max = mapping != null && "date_range".equals(mapping.type())
+                    ? dateOrDefault(maxValue, Long.MAX_VALUE, mapping)
+                    : longOrDefault(maxValue, Long.MAX_VALUE);
+            if (map.containsKey("gt") && min != Long.MAX_VALUE) {
+                min++;
+            }
+            if (map.containsKey("lt") && max != Long.MIN_VALUE) {
+                max--;
+            }
+            return min <= max ? new long[]{min, max} : null;
+        }
+        if (value instanceof List<?> list && list.size() == 2) {
+            Long min = mapping != null && "date_range".equals(mapping.type()) ? dateValue(list.get(0), mapping) : longValue(list.get(0));
+            Long max = mapping != null && "date_range".equals(mapping.type()) ? dateValue(list.get(1), mapping) : longValue(list.get(1));
+            return min == null || max == null || min > max ? null : new long[]{min, max};
+        }
+        return null;
+    }
+
+    private double[] doubleRangeValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Object minValue = firstPresent(map, "gte", "from", "min", "lower", "gt");
+            Object maxValue = firstPresent(map, "lte", "to", "max", "upper", "lt");
+            double min = doubleOrDefault(minValue, Double.NEGATIVE_INFINITY);
+            double max = doubleOrDefault(maxValue, Double.POSITIVE_INFINITY);
+            if (map.containsKey("gt")) {
+                min = DoublePoint.nextUp(min);
+            }
+            if (map.containsKey("lt")) {
+                max = DoublePoint.nextDown(max);
+            }
+            return min <= max ? new double[]{min, max} : null;
+        }
+        if (value instanceof List<?> list && list.size() == 2) {
+            Double min = doubleValue(list.get(0));
+            Double max = doubleValue(list.get(1));
+            return min == null || max == null || min > max ? null : new double[]{min, max};
+        }
+        return null;
+    }
+
+    private InetAddress[] ipRangeValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Object minValue = firstPresent(map, "gte", "from", "min", "lower", "gt");
+            Object maxValue = firstPresent(map, "lte", "to", "max", "upper", "lt");
+            InetAddress min = ipOrDefault(minValue, InetAddressPoint.MIN_VALUE);
+            InetAddress max = ipOrDefault(maxValue, InetAddressPoint.MAX_VALUE);
+            if (map.containsKey("gt")) {
+                min = InetAddressPoint.nextUp(min);
+            }
+            if (map.containsKey("lt")) {
+                max = InetAddressPoint.nextDown(max);
+            }
+            return new InetAddress[]{min, max};
+        }
+        if (value instanceof List<?> list && list.size() == 2) {
+            InetAddress min = ipValue(list.get(0));
+            InetAddress max = ipValue(list.get(1));
+            return min == null || max == null ? null : new InetAddress[]{min, max};
+        }
+        return null;
+    }
+
+    private Object firstPresent(Map<?, ?> map, String... keys) {
+        for (String key : keys) {
+            if (map.containsKey(key)) {
+                return map.get(key);
+            }
+        }
+        return null;
     }
 
     private String physicalIndexName(ShardId shardId) {

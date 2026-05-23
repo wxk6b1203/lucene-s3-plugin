@@ -6,10 +6,22 @@ public record FieldMapping(
         String similarity,
         Boolean indexed,
         Boolean stored,
-        Boolean docValues
+        Boolean docValues,
+        Boolean multiValued
 ) {
     public FieldMapping(String type, Integer dimension, String similarity, Boolean indexed, Boolean stored) {
-        this(type, dimension, similarity, indexed, stored, null);
+        this(type, dimension, similarity, indexed, stored, null, null);
+    }
+
+    public FieldMapping(
+            String type,
+            Integer dimension,
+            String similarity,
+            Boolean indexed,
+            Boolean stored,
+            Boolean docValues
+    ) {
+        this(type, dimension, similarity, indexed, stored, docValues, null);
     }
 
     public FieldMapping {
@@ -18,19 +30,24 @@ public record FieldMapping(
         indexed = indexed == null || indexed;
         stored = stored == null || stored;
         docValues = docValues == null ? defaultDocValues(type) : docValues;
-        if (denseVector() && (dimension == null || dimension <= 0)) {
-            throw new IllegalArgumentException("dense_vector mapping requires a positive dimension");
+        multiValued = multiValued != null && multiValued;
+        if ((denseVector() || byteVector()) && (dimension == null || dimension <= 0)) {
+            throw new IllegalArgumentException(type + " mapping requires a positive dimension");
         }
         if (!supportedType(type)) {
             throw new IllegalArgumentException("unsupported mapping type: " + type);
         }
-        if (denseVector() && !supportedSimilarity(similarity)) {
+        if ((denseVector() || byteVector()) && !supportedSimilarity(similarity)) {
             throw new IllegalArgumentException("unsupported vector similarity: " + similarity);
         }
     }
 
     public boolean denseVector() {
         return "dense_vector".equals(type);
+    }
+
+    public boolean byteVector() {
+        return "byte_vector".equals(type);
     }
 
     public boolean keyword() {
@@ -53,6 +70,38 @@ public record FieldMapping(
         return "boolean".equals(type);
     }
 
+    public boolean date() {
+        return "date".equals(type) || "date_nanos".equals(type);
+    }
+
+    public boolean dateNanos() {
+        return "date_nanos".equals(type);
+    }
+
+    public boolean ip() {
+        return "ip".equals(type);
+    }
+
+    public boolean binary() {
+        return "binary".equals(type);
+    }
+
+    public boolean geoPoint() {
+        return "geo_point".equals(type);
+    }
+
+    public boolean longRange() {
+        return "long_range".equals(type) || "integer_range".equals(type) || "date_range".equals(type);
+    }
+
+    public boolean doubleRange() {
+        return "double_range".equals(type) || "float_range".equals(type);
+    }
+
+    public boolean ipRange() {
+        return "ip_range".equals(type);
+    }
+
     private static String normalize(String value, String defaultValue) {
         return value == null || value.isBlank() ? defaultValue : value.trim().toLowerCase();
     }
@@ -65,7 +114,19 @@ public record FieldMapping(
                 || "double".equals(type)
                 || "float".equals(type)
                 || "boolean".equals(type)
-                || "dense_vector".equals(type);
+                || "dense_vector".equals(type)
+                || "byte_vector".equals(type)
+                || "date".equals(type)
+                || "date_nanos".equals(type)
+                || "ip".equals(type)
+                || "binary".equals(type)
+                || "geo_point".equals(type)
+                || "long_range".equals(type)
+                || "integer_range".equals(type)
+                || "date_range".equals(type)
+                || "double_range".equals(type)
+                || "float_range".equals(type)
+                || "ip_range".equals(type);
     }
 
     private static boolean supportedSimilarity(String similarity) {
@@ -79,8 +140,13 @@ public record FieldMapping(
         return "keyword".equals(type)
                 || "long".equals(type)
                 || "integer".equals(type)
+                || "date".equals(type)
+                || "date_nanos".equals(type)
                 || "double".equals(type)
                 || "float".equals(type)
-                || "boolean".equals(type);
+                || "boolean".equals(type)
+                || "ip".equals(type)
+                || "binary".equals(type)
+                || "geo_point".equals(type);
     }
 }

@@ -2323,7 +2323,8 @@ public class HttpApiServer implements AutoCloseable {
                         stringValue(fieldSpec.get("similarity")),
                         booleanObject(fieldSpec.containsKey("indexed") ? fieldSpec.get("indexed") : fieldSpec.get("index")),
                         booleanObject(fieldSpec.containsKey("stored") ? fieldSpec.get("stored") : fieldSpec.get("store")),
-                        booleanObject(fieldSpec.containsKey("doc_values") ? fieldSpec.get("doc_values") : fieldSpec.get("docValues"))
+                        booleanObject(fieldSpec.containsKey("doc_values") ? fieldSpec.get("doc_values") : fieldSpec.get("docValues")),
+                        booleanObject(fieldSpec.containsKey("multi_valued") ? fieldSpec.get("multi_valued") : fieldSpec.get("multiValued"))
                 ));
             }
         });
