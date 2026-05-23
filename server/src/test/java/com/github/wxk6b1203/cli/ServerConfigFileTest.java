@@ -49,6 +49,7 @@ class ServerConfigFileTest {
                     protocol: http
                     endpoint: http://127.0.0.1:9000
                     chunkedEncoding: true
+                    contentMd5: true
                     accessKey: minio
                     secretKey: password
                   snapshot:
@@ -77,6 +78,7 @@ class ServerConfigFileTest {
         assertEquals("http", options.s3Protocol());
         assertEquals("http://127.0.0.1:9000", options.s3Endpoint());
         assertEquals(true, options.s3ChunkedEncoding());
+        assertEquals(true, options.s3ContentMd5());
         assertEquals("minio", options.s3AccessKey());
         assertEquals("password", options.s3SecretKey());
         assertEquals(3, options.snapshotRetainLatest());
@@ -92,7 +94,8 @@ class ServerConfigFileTest {
                   "roles": "DATA,COORDINATING",
                   "s3": {
                     "bucket": "json-bucket",
-                    "chunkedEncoding": true
+                    "chunkedEncoding": true,
+                    "contentMd5": true
                   },
                   "snapshotRetainLatest": 4,
                   "cacheMaxBytes": 2048
@@ -105,6 +108,7 @@ class ServerConfigFileTest {
                 "-p", "9400",
                 "--s3-bucket", "cli-bucket",
                 "--no-s3-chunked-encoding",
+                "--no-s3-content-md5",
                 "--etcd-timeout", "6",
                 "--cache-max-bytes", "4096",
                 "--cache-cleanup-interval", "45",
@@ -117,6 +121,7 @@ class ServerConfigFileTest {
         assertEquals(Set.of(NodeRole.DATA, NodeRole.COORDINATING), options.roles());
         assertEquals("cli-bucket", options.s3Bucket());
         assertEquals(false, options.s3ChunkedEncoding());
+        assertEquals(false, options.s3ContentMd5());
         assertEquals(4, options.snapshotRetainLatest());
         assertEquals(6, options.etcdTimeoutSeconds());
         assertEquals(4096, options.cacheMaxBytes());

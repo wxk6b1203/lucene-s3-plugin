@@ -215,6 +215,7 @@ Windows 使用：
 | `--s3-protocol` | `https` | 当 `--s3-endpoint` 未包含 scheme 时使用的协议，可选 `http` 或 `https`。若 endpoint 已写 `http://` 或 `https://`，以 endpoint 为准。 |
 | `--s3-endpoint` | 空 | S3 兼容服务 endpoint，例如 `oss-cn-shanghai.aliyuncs.com` 或 `http://127.0.0.1:9000`。 |
 | `--s3-chunked-encoding` | `false` | 是否启用 AWS SDK S3 chunked encoding。默认关闭以兼容 OSS/MinIO 等 S3-compatible 服务；需要时可用 `--s3-chunked-encoding` 打开，或用 `--no-s3-chunked-encoding` 显式关闭。 |
+| `--s3-content-md5` | `false` | 是否启用 legacy `Content-MD5` header。阿里云 OSS 等 S3 兼容服务如果要求 `DeleteObjects` 带 `Content-MD5`，可打开该选项。 |
 | `--s3-access-key` | 空 | S3 access key。未指定时走 AWS SDK 默认凭证链。 |
 | `--s3-secret-key` | 空 | S3 secret key。未指定时走 AWS SDK 默认凭证链。 |
 | `--snapshot-retain-latest` | `2` | 每个 shard 至少保留的最新 commit snapshot generation 数。PIT pin 住的 generation 会额外保留。 |
@@ -249,6 +250,7 @@ server:
     protocol: http
     endpoint: http://127.0.0.1:9000
     chunkedEncoding: false
+    contentMd5: false
     accessKey: minioadmin
     secretKey: minioadmin
   snapshot:

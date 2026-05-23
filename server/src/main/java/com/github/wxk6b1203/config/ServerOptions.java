@@ -19,6 +19,7 @@ public record ServerOptions(
         String s3Protocol,
         String s3Endpoint,
         boolean s3ChunkedEncoding,
+        boolean s3ContentMd5,
         String s3AccessKey,
         String s3SecretKey,
         int snapshotRetainLatest,
@@ -68,6 +69,7 @@ public record ServerOptions(
                 s3Protocol,
                 s3Endpoint,
                 s3ChunkedEncoding,
+                false,
                 s3AccessKey,
                 s3SecretKey,
                 snapshotRetainLatest,
@@ -113,6 +115,7 @@ public record ServerOptions(
                 s3Protocol,
                 s3Endpoint,
                 s3ChunkedEncoding,
+                false,
                 s3AccessKey,
                 s3SecretKey,
                 snapshotRetainLatest,
@@ -160,6 +163,7 @@ public record ServerOptions(
                 s3Protocol,
                 s3Endpoint,
                 s3ChunkedEncoding,
+                false,
                 s3AccessKey,
                 s3SecretKey,
                 snapshotRetainLatest,
@@ -167,6 +171,55 @@ public record ServerOptions(
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
                 0
+        );
+    }
+
+    public ServerOptions(
+            int httpPort,
+            String clusterName,
+            String nodeId,
+            String nodeName,
+            String host,
+            Set<NodeRole> roles,
+            String etcdEndpoints,
+            String etcdNamespace,
+            String dataPath,
+            String s3Bucket,
+            String s3Region,
+            String s3Protocol,
+            String s3Endpoint,
+            boolean s3ChunkedEncoding,
+            String s3AccessKey,
+            String s3SecretKey,
+            int snapshotRetainLatest,
+            int etcdTimeoutSeconds,
+            long cacheMaxBytes,
+            int cacheCleanupIntervalSeconds,
+            int metricsPort
+    ) {
+        this(
+                httpPort,
+                clusterName,
+                nodeId,
+                nodeName,
+                host,
+                roles,
+                etcdEndpoints,
+                etcdNamespace,
+                dataPath,
+                s3Bucket,
+                s3Region,
+                s3Protocol,
+                s3Endpoint,
+                s3ChunkedEncoding,
+                false,
+                s3AccessKey,
+                s3SecretKey,
+                snapshotRetainLatest,
+                etcdTimeoutSeconds,
+                cacheMaxBytes,
+                cacheCleanupIntervalSeconds,
+                metricsPort
         );
     }
 

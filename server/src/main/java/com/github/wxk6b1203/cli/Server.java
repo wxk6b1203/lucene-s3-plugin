@@ -9,12 +9,12 @@ import picocli.CommandLine;
 import picocli.CommandLine.Model.CommandSpec;
 
 import java.io.IOException;
-import java.util.Collection;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -79,6 +79,9 @@ public class Server implements Callable<Integer> {
 
     @CommandLine.Option(names = {"--s3-chunked-encoding"}, negatable = true, description = "Enable AWS SDK S3 chunked encoding. Disabled by default for S3-compatible services.")
     private boolean s3ChunkedEncoding = false;
+
+    @CommandLine.Option(names = {"--s3-content-md5"}, negatable = true, description = "Enable legacy Content-MD5 headers for S3 requests that require MD5, such as DeleteObjects on some S3-compatible services.")
+    private boolean s3ContentMd5 = false;
 
     @CommandLine.Option(names = {"--s3-access-key"}, description = "S3 access key")
     private String s3AccessKey;
@@ -145,6 +148,9 @@ public class Server implements Callable<Integer> {
                 optionValue("--s3-chunked-encoding", s3ChunkedEncoding, () -> config.booleanValue(s3ChunkedEncoding,
                         "s3ChunkedEncoding", "s3.chunkedEncoding", "s3.chunked.encoding",
                         "server.s3ChunkedEncoding", "server.s3.chunkedEncoding", "server.s3.chunked.encoding")),
+                optionValue("--s3-content-md5", s3ContentMd5, () -> config.booleanValue(s3ContentMd5,
+                        "s3ContentMd5", "s3.contentMd5", "s3.content.md5",
+                        "server.s3ContentMd5", "server.s3.contentMd5", "server.s3.content.md5")),
                 optionValue("--s3-access-key", s3AccessKey, () -> config.stringValue(s3AccessKey,
                         "s3AccessKey", "s3.accessKey", "s3.access.key", "server.s3AccessKey", "server.s3.accessKey")),
                 optionValue("--s3-secret-key", s3SecretKey, () -> config.stringValue(s3SecretKey,

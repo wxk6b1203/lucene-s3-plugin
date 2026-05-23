@@ -53,3 +53,5 @@ bin/
 .DS_Store
 
 .idea/
+### Generated files ###
+data/

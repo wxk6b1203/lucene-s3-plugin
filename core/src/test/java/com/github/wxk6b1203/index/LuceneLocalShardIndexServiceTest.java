@@ -25,10 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class LuceneLocalShardIndexServiceTest {
     @TempDir
@@ -85,6 +82,56 @@ public class LuceneLocalShardIndexServiceTest {
             assertEquals(1, response.hits().size());
             assertEquals("doc-1", response.hits().getFirst().id());
             assertEquals("Lucene", response.hits().getFirst().source().get("title"));
+        }
+    }
+
+    @Test
+    public void bulkCreateDeleteCreateSameIdFollowsItemOrder() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            List<IndexDocumentOperationResult> results = service.bulk(List.of(
+                    new IndexDocumentOperation("create", new IndexDocumentRequest(
+                            "books",
+                            shardId,
+                            "doc-1",
+                            Map.of("title", "first"),
+                            Map.of(),
+                            true
+                    )),
+                    new IndexDocumentOperation("delete", new IndexDocumentRequest(
+                            "books",
+                            shardId,
+                            "doc-1",
+                            Map.of()
+                    )),
+                    new IndexDocumentOperation("create", new IndexDocumentRequest(
+                            "books",
+                            shardId,
+                            "doc-1",
+                            Map.of("title", "second"),
+                            Map.of(),
+                            true
+                    ))
+            ));
+
+            assertEquals(3, results.size());
+            assertFalse(results.get(0).failed());
+            assertFalse(results.get(1).failed());
+            assertFalse(results.get(2).failed());
+
+            var response = service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("term", Map.of("_id", "doc-1")), List.of(), null, null, 0, 10)
+            );
+
+            assertEquals(1, response.hits().size());
+            assertEquals("second", response.hits().getFirst().source().get("title"));
         }
     }
 

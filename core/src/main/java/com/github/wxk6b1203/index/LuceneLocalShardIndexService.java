@@ -4,55 +4,19 @@ import com.github.wxk6b1203.cluster.FieldMapping;
 import com.github.wxk6b1203.cluster.ShardId;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
-import com.github.wxk6b1203.search.ByQueryRequest;
-import com.github.wxk6b1203.search.ByQueryResponse;
-import com.github.wxk6b1203.search.PointInTimeResponse;
+import com.github.wxk6b1203.search.*;
+import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.directory.S3CachingDirectory;
 import com.github.wxk6b1203.store.directory.S3DirectoryOptions;
 import com.github.wxk6b1203.store.directory.S3LockFactory;
-import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import com.github.wxk6b1203.store.manifest.ManifestOptions;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
-import com.github.wxk6b1203.search.SearchHit;
-import com.github.wxk6b1203.search.SearchRequest;
-import com.github.wxk6b1203.search.SearchResponse;
 import com.github.wxk6b1203.util.JsonUtil;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.document.DoubleDocValuesField;
-import org.apache.lucene.document.DoublePoint;
-import org.apache.lucene.document.Field;
-import org.apache.lucene.document.KnnFloatVectorField;
-import org.apache.lucene.document.LongPoint;
-import org.apache.lucene.document.NumericDocValuesField;
-import org.apache.lucene.document.SortedDocValuesField;
-import org.apache.lucene.document.StoredField;
-import org.apache.lucene.document.StringField;
-import org.apache.lucene.document.TextField;
-import org.apache.lucene.index.DirectoryReader;
-import org.apache.lucene.index.DocValues;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.IndexWriterConfig;
-import org.apache.lucene.index.IndexNotFoundException;
-import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.index.NumericDocValues;
-import org.apache.lucene.index.SortedDocValues;
-import org.apache.lucene.index.Term;
-import org.apache.lucene.index.VectorSimilarityFunction;
-import org.apache.lucene.search.BooleanClause;
-import org.apache.lucene.search.BooleanQuery;
-import org.apache.lucene.search.FieldDoc;
-import org.apache.lucene.search.IndexSearcher;
-import org.apache.lucene.search.KnnFloatVectorQuery;
-import org.apache.lucene.search.MatchAllDocsQuery;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.search.ScoreDoc;
-import org.apache.lucene.search.Sort;
-import org.apache.lucene.search.SortField;
-import org.apache.lucene.search.TermQuery;
-import org.apache.lucene.search.TopFieldDocs;
-import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.document.*;
+import org.apache.lucene.index.*;
+import org.apache.lucene.search.*;
 import org.apache.lucene.util.BytesRef;
 
 import java.io.IOException;
@@ -61,17 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class LuceneLocalShardIndexService implements LocalShardIndexService {
@@ -157,7 +111,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         synchronized (shardWriter) {
             List<IndexDocumentOperationResult> results = new ArrayList<>(operationList.size());
             List<Integer> successfulPositions = new ArrayList<>();
-            Set<String> createdIds = new HashSet<>();
+            Set<String> visibleCreateIds = visibleCreateIds(shardWriter.writer, operationList);
             for (int i = 0; i < operationList.size(); i++) {
                 IndexDocumentOperation operation = operationList.get(i);
                 IndexDocumentRequest request = operation.request();
@@ -166,21 +120,19 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                     IndexDocumentResponse response;
                     if (operation.delete()) {
                         shardWriter.writer.deleteDocuments(new Term("_id", id));
+                        visibleCreateIds.remove(id);
                         response = new IndexDocumentResponse(request.indexName(), request.shardId(), id, "deleted", true);
                     } else {
                         Document document = document(request.indexName(), request.shardId(), id, request.source(), request.mappings());
                         if (request.createOnly()) {
-                            if (!createdIds.add(id)) {
+                            if (visibleCreateIds.contains(id)) {
                                 throw new IllegalArgumentException("document already exists: " + id);
                             }
-                            try (DirectoryReader reader = DirectoryReader.open(shardWriter.writer)) {
-                                if (new IndexSearcher(reader).count(new TermQuery(new Term("_id", id))) > 0) {
-                                    throw new IllegalArgumentException("document already exists: " + id);
-                                }
-                            }
                             shardWriter.writer.addDocument(document);
+                            visibleCreateIds.add(id);
                         } else {
                             shardWriter.writer.updateDocument(new Term("_id", id), document);
+                            visibleCreateIds.add(id);
                         }
                         response = new IndexDocumentResponse(
                                 request.indexName(),
@@ -207,6 +159,29 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
             return results;
         }
+    }
+
+    private Set<String> visibleCreateIds(IndexWriter writer, List<IndexDocumentOperation> operations) throws IOException {
+        Set<String> createIds = new HashSet<>();
+        for (IndexDocumentOperation operation : operations) {
+            IndexDocumentRequest request = operation.request();
+            if (request.createOnly() && request.id() != null && !request.id().isBlank()) {
+                createIds.add(request.id());
+            }
+        }
+        if (createIds.isEmpty()) {
+            return new HashSet<>();
+        }
+        Set<String> visibleIds = new HashSet<>();
+        try (DirectoryReader reader = DirectoryReader.open(writer)) {
+            IndexSearcher searcher = new IndexSearcher(reader);
+            for (String id : createIds) {
+                if (searcher.count(new TermQuery(new Term("_id", id))) > 0) {
+                    visibleIds.add(id);
+                }
+            }
+        }
+        return visibleIds;
     }
 
     @Override

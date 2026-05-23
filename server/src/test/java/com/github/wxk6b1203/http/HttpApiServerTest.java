@@ -18,9 +18,9 @@ import java.net.HttpURLConnection;
 import java.net.ServerSocket;
 import java.net.URI;
 import java.net.URL;
-import java.nio.file.Path;
-import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
@@ -29,11 +29,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.*;
 
 class HttpApiServerTest {
     @TempDir
@@ -525,6 +521,18 @@ class HttpApiServerTest {
                                 "source", Map.of("category", "internal", "pages", 1)
                         ),
                         Map.of(
+                                "action", "delete",
+                                "index", "books",
+                                "id", "doc-1",
+                                "source", Map.of()
+                        ),
+                        Map.of(
+                                "action", "create",
+                                "index", "books",
+                                "id", "doc-1",
+                                "source", Map.of("category", "internal", "pages", 3)
+                        ),
+                        Map.of(
                                 "action", "create",
                                 "index", "books",
                                 "id", "doc-2",
@@ -534,7 +542,7 @@ class HttpApiServerTest {
         ), 200);
         assertEquals(false, bulk.get("errors"));
         List<Map<String, Object>> items = (List<Map<String, Object>>) bulk.get("items");
-        assertEquals(2, items.size());
+        assertEquals(4, items.size());
 
         Map<String, Object> search = post("/books/_search", Map.of(
                 "query", Map.of("term", Map.of("category", "internal")),

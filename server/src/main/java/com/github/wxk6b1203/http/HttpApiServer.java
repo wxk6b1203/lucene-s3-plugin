@@ -1,54 +1,17 @@
 package com.github.wxk6b1203.http;
 
-import com.github.wxk6b1203.cluster.ClusterIndexService;
-import com.github.wxk6b1203.cluster.ClusterNode;
-import com.github.wxk6b1203.cluster.ClusterStateRepository;
-import com.github.wxk6b1203.cluster.ClusterCoordinator;
-import com.github.wxk6b1203.cluster.ClusterState;
-import com.github.wxk6b1203.cluster.BalancedShardAllocator;
-import com.github.wxk6b1203.cluster.DefaultClusterIndexService;
-import com.github.wxk6b1203.cluster.FieldMapping;
-import com.github.wxk6b1203.cluster.HashShardRouter;
-import com.github.wxk6b1203.cluster.IndexLifecyclePolicy;
-import com.github.wxk6b1203.cluster.IndexSettings;
-import com.github.wxk6b1203.cluster.InMemoryClusterStateRepository;
-import com.github.wxk6b1203.cluster.IndexLifecycleService;
-import com.github.wxk6b1203.cluster.LifecyclePhase;
-import com.github.wxk6b1203.cluster.MasterOnlyClusterStateRepository;
-import com.github.wxk6b1203.cluster.NodeRole;
-import com.github.wxk6b1203.cluster.NoopClusterCoordinator;
-import com.github.wxk6b1203.cluster.ShardId;
-import com.github.wxk6b1203.cluster.ShardAllocator;
-import com.github.wxk6b1203.cluster.ShardRouting;
-import com.github.wxk6b1203.cluster.ShardState;
-import com.github.wxk6b1203.cluster.WriteRoute;
-import com.github.wxk6b1203.cluster.WriteRouter;
+import com.github.wxk6b1203.cluster.*;
 import com.github.wxk6b1203.cluster.etcd.EtcdClusterCoordinator;
 import com.github.wxk6b1203.cluster.etcd.EtcdClusterStateRepository;
 import com.github.wxk6b1203.config.ServerOptions;
-import com.github.wxk6b1203.search.ByQueryRequest;
-import com.github.wxk6b1203.search.ByQueryResponse;
-import com.github.wxk6b1203.search.PointInTimeResponse;
-import com.github.wxk6b1203.search.SearchRequest;
-import com.github.wxk6b1203.search.SearchPlanner;
-import com.github.wxk6b1203.search.SearchPlan;
-import com.github.wxk6b1203.search.SearchResponse;
-import com.github.wxk6b1203.search.SearchShardTarget;
-import com.github.wxk6b1203.search.SearchHit;
-import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.errors.NotMasterException;
-import com.github.wxk6b1203.errors.StorageException;
-import com.github.wxk6b1203.index.IndexDocumentRequest;
-import com.github.wxk6b1203.index.IndexDocumentOperation;
-import com.github.wxk6b1203.index.IndexDocumentOperationResult;
-import com.github.wxk6b1203.index.IndexDocumentResponse;
-import com.github.wxk6b1203.index.LocalShardIndexService;
-import com.github.wxk6b1203.index.LuceneLocalShardIndexService;
+import com.github.wxk6b1203.index.*;
 import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 import com.github.wxk6b1203.metadata.provider.etcd.EtcdManifestMetadataManager;
 import com.github.wxk6b1203.metadata.provider.mem.MemMockProvider;
+import com.github.wxk6b1203.search.*;
 import com.github.wxk6b1203.store.directory.RemoteCacheStats;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
 import com.github.wxk6b1203.store.manifest.ManifestOptions;
@@ -56,60 +19,42 @@ import com.github.wxk6b1203.store.object.LocalFileRemoteObjectStore;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
 import com.github.wxk6b1203.store.object.S3RemoteObjectStore;
 import com.github.wxk6b1203.util.JsonUtil;
+import io.etcd.jetcd.Client;
 import io.vertx.core.Context;
-import io.vertx.core.buffer.Buffer;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpServer;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
-import io.etcd.jetcd.Client;
 import lombok.extern.slf4j.Slf4j;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3ClientBuilder;
+import software.amazon.awssdk.services.s3.S3Configuration;
 
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Locale;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.CompletionException;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
-import software.amazon.awssdk.core.exception.SdkClientException;
-import software.amazon.awssdk.core.exception.SdkServiceException;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.S3ClientBuilder;
-import software.amazon.awssdk.services.s3.S3Configuration;
-
-import static com.github.wxk6b1203.http.HttpApiResponses.error;
-import static com.github.wxk6b1203.http.HttpApiResponses.exception;
-import static com.github.wxk6b1203.http.HttpApiResponses.json;
-import static com.github.wxk6b1203.http.HttpApiResponses.status;
+import static com.github.wxk6b1203.http.HttpApiResponses.*;
 
 @Slf4j
 public class HttpApiServer implements AutoCloseable {
@@ -249,6 +194,9 @@ public class HttpApiServer implements AutoCloseable {
             return new LocalFileRemoteObjectStore(dataPath.resolve("remote-objects"));
         }
         S3ClientBuilder builder = S3Client.builder();
+        if (options.s3ContentMd5()) {
+            builder.addPlugin(LegacyMd5Plugin.create());
+        }
         if (options.s3Region() != null && !options.s3Region().isBlank()) {
             builder.region(Region.of(options.s3Region()));
         }
@@ -901,16 +849,24 @@ public class HttpApiServer implements AutoCloseable {
             Long allocationEpoch = longObject(body.get("allocation_epoch"));
             validateShardWriteFence(shardId, ownerTerm, allocationEpoch);
             Map<String, FieldMapping> mappings = indexSettings(index, clusterStateRepository.current()).mappings();
-            List<BulkItemResponse> responses = new ArrayList<>();
-            for (Object value : objectList(body.get("items"))) {
+            List<Object> requestItems = objectList(body.get("items"));
+            List<BulkItemPlan> plans = new ArrayList<>(requestItems.size());
+            WriteRoute route = new WriteRoute(
+                    shardId,
+                    localNode.id(),
+                    localNode.host(),
+                    localNode.httpPort(),
+                    ownerTerm,
+                    allocationEpoch
+            );
+            for (int ordinal = 0; ordinal < requestItems.size(); ordinal++) {
+                Object value = requestItems.get(ordinal);
                 BulkItemRequest item = internalBulkItem(mapValue(value), index);
-                String id = item.id();
-                try {
-                    responses.add(executeLocalBulkItem(item, shardId, id, mappings));
-                } catch (Exception e) {
-                    responses.add(bulkError(item, id, status(e), e));
-                }
+                plans.add(new BulkItemPlan(ordinal, item, item.id(), route, mappings));
             }
+            List<BulkItemResponse> responses = executeLocalBulkPlans(plans).stream()
+                    .map(BulkItemResult::response)
+                    .toList();
             json(context, 200, Map.of(
                     "errors", responses.stream().anyMatch(BulkItemResponse::failed),
                     "items", responses.stream().map(BulkItemResponse::asMap).toList()
@@ -936,7 +892,11 @@ public class HttpApiServer implements AutoCloseable {
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("internal bulk item requires id");
         }
-        return new BulkItemRequest(action, index, id, null, mapValue(value.get("source")));
+        String routing = stringValue(value.get("routing"));
+        if (routing == null || routing.isBlank()) {
+            routing = stringValue(value.get("_routing"));
+        }
+        return new BulkItemRequest(action, index, id, routing, mapValue(value.get("source")));
     }
 
     private void internalShardDeleteByQuery(RoutingContext context) {
@@ -1229,8 +1189,8 @@ public class HttpApiServer implements AutoCloseable {
                 ))));
             }
         }
-        localBatches.forEach((key, plans) -> futures.add(Future.succeededFuture(executeLocalBulkBatch(key, plans))));
         remoteBatches.forEach((key, plans) -> futures.add(executeRemoteBulkBatch(key, plans)));
+        localBatches.forEach((key, plans) -> futures.add(Future.succeededFuture(executeLocalBulkBatch(key, plans))));
         return futures;
     }
 
@@ -1262,6 +1222,16 @@ public class HttpApiServer implements AutoCloseable {
     private List<BulkItemResult> executeLocalBulkBatch(BulkShardBatchKey key, List<BulkItemPlan> plans) {
         try {
             validateShardWriteFence(key.shardId(), key.ownerTerm(), key.allocationEpoch());
+            return executeLocalBulkPlans(plans);
+        } catch (Exception e) {
+            return plans.stream()
+                    .map(plan -> new BulkItemResult(plan.ordinal(), bulkError(plan.item(), plan.id(), status(e), e)))
+                    .toList();
+        }
+    }
+
+    private List<BulkItemResult> executeLocalBulkPlans(List<BulkItemPlan> plans) {
+        try {
             List<IndexDocumentOperation> operations = plans.stream()
                     .map(plan -> new IndexDocumentOperation(
                             plan.item().action(),
@@ -1305,33 +1275,6 @@ public class HttpApiServer implements AutoCloseable {
         }
     }
 
-    private BulkItemResponse executeLocalBulkItem(
-            BulkItemRequest item,
-            ShardId shardId,
-            String id,
-            Map<String, FieldMapping> mappings
-    ) throws IOException {
-        if (item.action().equals("delete")) {
-            IndexDocumentResponse response = localShardIndexService.delete(new IndexDocumentRequest(
-                    item.index(),
-                    shardId,
-                    id,
-                    Map.of(),
-                    mappings
-            ));
-            return bulkSuccess(item, response, 200);
-        }
-        IndexDocumentResponse response = localShardIndexService.index(new IndexDocumentRequest(
-                item.index(),
-                shardId,
-                id,
-                item.source(),
-                mappings,
-                item.action().equals("create")
-        ));
-        return bulkSuccess(item, response, 201);
-    }
-
     private Future<List<BulkItemResult>> executeRemoteBulkBatch(BulkShardBatchKey key, List<BulkItemPlan> plans) {
         String uri = "/_internal/" + urlPart(key.shardId().indexName())
                 + "/" + key.shardId().shardNumber()
@@ -1352,6 +1295,9 @@ public class HttpApiServer implements AutoCloseable {
                     item.put("action", plan.item().action());
                     item.put("index", plan.item().index());
                     item.put("id", plan.id());
+                    if (plan.item().routing() != null && !plan.item().routing().isBlank()) {
+                        item.put("routing", plan.item().routing());
+                    }
                     item.put("source", plan.item().source());
                     return item;
                 }).toList()
@@ -1384,19 +1330,44 @@ public class HttpApiServer implements AutoCloseable {
                 ));
                 continue;
             }
-            results.add(new BulkItemResult(plan.ordinal(), bulkResponseFromMap(plan.item(), mapValue(items.get(i)))));
+            results.add(new BulkItemResult(plan.ordinal(), bulkResponseFromMap(plan, mapValue(items.get(i)))));
         }
         return results;
     }
 
-    private BulkItemResponse bulkResponseFromMap(BulkItemRequest item, Map<String, Object> response) {
-        Map<String, Object> body = mapValue(response.get(item.action()));
+    private BulkItemResponse bulkResponseFromMap(BulkItemPlan plan, Map<String, Object> response) {
+        BulkItemRequest item = plan.item();
+        Object actionBody = response.get(item.action());
+        if (!(actionBody instanceof Map<?, ?>)) {
+            return bulkError(
+                    item,
+                    plan.id(),
+                    502,
+                    new IllegalStateException("remote bulk response missing action item: " + item.action())
+            );
+        }
+        Map<String, Object> body = mapValue(actionBody);
+        Integer status = intObject(body.get("status"));
+        if (status == null) {
+            return bulkError(
+                    item,
+                    plan.id(),
+                    502,
+                    new IllegalStateException("remote bulk response missing item status: " + item.action())
+            );
+        }
         Map<String, Object> error = body.get("error") instanceof Map<?, ?> ? mapValue(body.get("error")) : null;
+        if (status >= 300 && error == null) {
+            error = Map.of(
+                    "type", "RemoteBulkItemException",
+                    "reason", "remote bulk item failed without error body"
+            );
+        }
         return new BulkItemResponse(
                 item.action(),
-                stringValue(body.get("_index")),
-                stringValue(body.get("_id")),
-                intValue(body.get("status"), error == null ? 200 : 400),
+                stringValueOrDefault(body.get("_index"), item.index()),
+                stringValueOrDefault(body.get("_id"), plan.id()),
+                status,
                 stringValue(body.get("result")),
                 body.get("shardId"),
                 error
@@ -1428,6 +1399,11 @@ public class HttpApiServer implements AutoCloseable {
                         "reason", e.getMessage() == null ? "" : e.getMessage()
                 )
         );
+    }
+
+    private String stringValueOrDefault(Object value, String defaultValue) {
+        String string = stringValue(value);
+        return string == null || string.isBlank() ? defaultValue : string;
     }
 
     private String routingOrId(String routing, String id) {
