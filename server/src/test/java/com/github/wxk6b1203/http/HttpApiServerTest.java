@@ -180,6 +180,35 @@ class HttpApiServerTest {
 
     @Test
     @Timeout(60)
+    void textMappingAcceptsConfiguredAnalyzer() throws Exception {
+        startServer();
+        put("/analyzed_books", Map.of(
+                "number_of_shards", 1,
+                "mappings", Map.of("properties", Map.of(
+                        "title", Map.of(
+                                "type", "text",
+                                "analyzer", "keyword",
+                                "search_analyzer", "keyword"
+                        )
+                ))
+        ), 200);
+        post("/analyzed_books/_doc/doc-1", Map.of("title", "Lucene in Action"), 201);
+
+        Map<String, Object> tokenSearch = post("/analyzed_books/_search", Map.of(
+                "query", Map.of("match", Map.of("title", "lucene")),
+                "size", 10
+        ), 200);
+        Map<String, Object> exactSearch = post("/analyzed_books/_search", Map.of(
+                "query", Map.of("match", Map.of("title", "Lucene in Action")),
+                "size", 10
+        ), 200);
+
+        assertTrue(hitIds(tokenSearch).isEmpty());
+        assertEquals(List.of("doc-1"), hitIds(exactSearch));
+    }
+
+    @Test
+    @Timeout(60)
     void expiredPointInTimeIsClosedByMaintenanceTask() throws Exception {
         startServer();
         createBooksIndex();
@@ -677,6 +706,7 @@ class HttpApiServerTest {
                 10,
                 uploadWaitStrategy,
                 5,
+                null,
                 0,
                 60,
                 0

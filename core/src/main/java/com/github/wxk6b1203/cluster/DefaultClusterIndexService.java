@@ -1,6 +1,7 @@
 package com.github.wxk6b1203.cluster;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -51,6 +52,31 @@ public class DefaultClusterIndexService implements ClusterIndexService, IndexLif
     }
 
     @Override
+    public ClusterState markIndexDeleting(String indexName) throws IOException {
+        return repository.update(state -> {
+            IndexSettings current = state.indices().get(indexName);
+            if (current == null) {
+                throw new IllegalArgumentException("index not found: " + indexName);
+            }
+            if (current.deletePending()) {
+                return state;
+            }
+            HashMap<String, IndexSettings> indices = new HashMap<>(state.indices());
+            indices.put(indexName, current.markDeleting(Instant.now()));
+            return new ClusterState(
+                    state.clusterName(),
+                    state.version(),
+                    state.masterNodeId(),
+                    state.nodes(),
+                    indices,
+                    state.routingTable(),
+                    state.lifecyclePolicies(),
+                    state.updatedAt()
+            );
+        });
+    }
+
+    @Override
     public ClusterState deleteIndex(String indexName) throws IOException {
         return repository.update(state -> {
             HashMap<String, IndexSettings> indices = new HashMap<>(state.indices());
@@ -78,6 +104,9 @@ public class DefaultClusterIndexService implements ClusterIndexService, IndexLif
             if (current == null) {
                 throw new IllegalArgumentException("index not found: " + indexName);
             }
+            if (current.deletePending()) {
+                throw new IllegalArgumentException("index is deleting: " + indexName);
+            }
             HashMap<String, FieldMapping> mergedMappings = new HashMap<>(current.mappings());
             mappings.forEach((field, mapping) -> {
                 FieldMapping existing = mergedMappings.get(field);
@@ -90,13 +119,7 @@ public class DefaultClusterIndexService implements ClusterIndexService, IndexLif
                 return state;
             }
             HashMap<String, IndexSettings> indices = new HashMap<>(state.indices());
-            indices.put(indexName, new IndexSettings(
-                    current.name(),
-                    current.numberOfShards(),
-                    current.lifecyclePolicy(),
-                    current.createdAt(),
-                    mergedMappings
-            ));
+            indices.put(indexName, current.withMappings(mergedMappings));
             return new ClusterState(
                     state.clusterName(),
                     state.version(),
@@ -135,17 +158,14 @@ public class DefaultClusterIndexService implements ClusterIndexService, IndexLif
             if (current == null) {
                 throw new IllegalArgumentException("index not found: " + indexName);
             }
+            if (current.deletePending()) {
+                throw new IllegalArgumentException("index is deleting: " + indexName);
+            }
             if (!state.lifecyclePolicies().containsKey(policyName)) {
                 throw new IllegalArgumentException("lifecycle policy not found: " + policyName);
             }
             HashMap<String, IndexSettings> indices = new HashMap<>(state.indices());
-            indices.put(indexName, new IndexSettings(
-                    current.name(),
-                    current.numberOfShards(),
-                    policyName,
-                    current.createdAt(),
-                    current.mappings()
-            ));
+            indices.put(indexName, current.withLifecyclePolicy(policyName));
             return new ClusterState(
                     state.clusterName(),
                     state.version(),

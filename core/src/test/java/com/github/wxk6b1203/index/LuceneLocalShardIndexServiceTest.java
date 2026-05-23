@@ -672,6 +672,63 @@ public class LuceneLocalShardIndexServiceTest {
     }
 
     @Test
+    public void testTextFieldUsesConfiguredAnalyzerForIndexAndMatchQuery() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.of(
+                "title", new FieldMapping("text", null, null, true, true, null, null, "keyword", "keyword")
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of(
+                    "title", "Lucene in Action"
+            ), mappings));
+
+            var tokenSearch = service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("match", Map.of("title", "lucene")), List.of(), null, null, 0, 10, mappings)
+            );
+            var exactSearch = service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("match", Map.of("title", "Lucene in Action")), List.of(), null, null, 0, 10, mappings)
+            );
+
+            assertTrue(tokenSearch.hits().isEmpty());
+            assertEquals(List.of("doc-1"), exactSearch.hits().stream().map(hit -> hit.id()).toList());
+        }
+    }
+
+    @Test
+    public void testMatchQueryWithNoAnalyzerTokensMatchesNoDocuments() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.of(
+                "title", new FieldMapping("text", null, null, true, true, null, null, "standard", "standard")
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of(
+                    "title", "Lucene in Action"
+            ), mappings));
+
+            var response = service.search(
+                    shardId,
+                    new SearchRequest("books", Map.of("match", Map.of("title", "")), List.of(), null, null, 0, 10, mappings)
+            );
+
+            assertTrue(response.hits().isEmpty());
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     public void testExtendedMappedFieldsAreSearchable() throws Exception {
         MemMockProvider metadata = new MemMockProvider();

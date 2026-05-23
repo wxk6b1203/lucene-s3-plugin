@@ -43,6 +43,8 @@ class ServerConfigFileTest {
                     cleanupIntervalSeconds: 30
                   metrics:
                     port: 9500
+                  analyzer:
+                    pluginPath: plugins/analyzers
                   s3:
                     bucket: yaml-bucket
                     region: us-east-1
@@ -73,6 +75,7 @@ class ServerConfigFileTest {
         assertEquals(1048576, options.cacheMaxBytes());
         assertEquals(30, options.cacheCleanupIntervalSeconds());
         assertEquals(9500, options.metricsPort());
+        assertEquals("plugins/analyzers", options.analyzerPluginPath());
         assertEquals("yaml-bucket", options.s3Bucket());
         assertEquals("us-east-1", options.s3Region());
         assertEquals("http", options.s3Protocol());

@@ -2,6 +2,7 @@ package com.github.wxk6b1203.index;
 
 import com.github.wxk6b1203.cluster.FieldMapping;
 import com.github.wxk6b1203.cluster.ShardId;
+import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.ManifestMetadataManager;
 import com.github.wxk6b1203.search.*;
@@ -13,7 +14,9 @@ import com.github.wxk6b1203.store.manifest.ManifestManager;
 import com.github.wxk6b1203.store.manifest.ManifestOptions;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
 import com.github.wxk6b1203.util.JsonUtil;
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.search.*;
@@ -34,12 +37,15 @@ import java.time.format.DateTimeParseException;
 import java.util.Base64;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private static final int UPDATE_BY_QUERY_BATCH_SIZE = 512;
+    private static final Duration REMOTE_SEARCHER_CACHE_TTL = Duration.ofMinutes(5);
 
     private final Path basePath;
     private final String bucket;
@@ -47,7 +53,10 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private final ManifestMetadataManager metadataManager;
     private final RemoteObjectStore remoteObjectStore;
     private final ExecutorService uploadWorkerPool;
+    private final AnalyzerRegistry analyzerRegistry;
+    private final ConcurrentMap<ShardId, Map<String, FieldMapping>> mappingsByShard = new ConcurrentHashMap<>();
     private final Map<ShardId, ShardWriter> writers = new ConcurrentHashMap<>();
+    private final Map<RemoteSearcherKey, CachedRemoteSearcher> remoteSearchers = new ConcurrentHashMap<>();
     private final Map<String, PitContext> pits = new ConcurrentHashMap<>();
 
     public LuceneLocalShardIndexService(
@@ -66,17 +75,30 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             RemoteObjectStore remoteObjectStore,
             ManifestOptions manifestOptions
     ) {
+        this(basePath, bucket, metadataManager, remoteObjectStore, manifestOptions, null);
+    }
+
+    public LuceneLocalShardIndexService(
+            Path basePath,
+            String bucket,
+            ManifestMetadataManager metadataManager,
+            RemoteObjectStore remoteObjectStore,
+            ManifestOptions manifestOptions,
+            Path analyzerPluginPath
+    ) {
         this.basePath = basePath;
         this.bucket = bucket;
         this.manifestOptions = manifestOptions == null ? new ManifestOptions(bucket) : manifestOptions;
         this.metadataManager = metadataManager;
         this.remoteObjectStore = remoteObjectStore;
+        this.analyzerRegistry = new AnalyzerRegistry(analyzerPluginPath);
         this.uploadWorkerPool = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("upload-worker-", 0).factory());
     }
 
     @Override
     public IndexDocumentResponse index(IndexDocumentRequest request) throws IOException {
         String id = request.id() == null || request.id().isBlank() ? UUID.randomUUID().toString() : request.id();
+        rememberMappings(request.shardId(), request.mappings());
         ShardWriter shardWriter = writers.computeIfAbsent(request.shardId(), this::openShardWriter);
         synchronized (shardWriter) {
             Document document = document(request.indexName(), request.shardId(), id, request.source(), request.mappings());
@@ -90,7 +112,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             } else {
                 shardWriter.writer.updateDocument(new Term("_id", id), document);
             }
-            shardWriter.writer.commit();
+            commitAndRefresh(shardWriter);
         }
         return new IndexDocumentResponse(
                 request.indexName(),
@@ -109,7 +131,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         ShardWriter shardWriter = writers.computeIfAbsent(request.shardId(), this::openShardWriter);
         synchronized (shardWriter) {
             shardWriter.writer.deleteDocuments(new Term("_id", request.id()));
-            shardWriter.writer.commit();
+            commitAndRefresh(shardWriter);
         }
         return new IndexDocumentResponse(request.indexName(), request.shardId(), request.id(), "deleted", true);
     }
@@ -121,6 +143,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             return List.of();
         }
         ShardId shardId = null;
+        Map<String, FieldMapping> mappings = Map.of();
         for (IndexDocumentOperation operation : operationList) {
             if (operation.request() == null) {
                 throw new IllegalArgumentException("bulk operation request is required");
@@ -130,7 +153,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             } else if (!shardId.equals(operation.request().shardId())) {
                 throw new IllegalArgumentException("bulk batch must target a single shard");
             }
+            if (!operation.request().mappings().isEmpty()) {
+                mappings = operation.request().mappings();
+            }
         }
+        rememberMappings(shardId, mappings);
         ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
         synchronized (shardWriter) {
             List<IndexDocumentOperationResult> results = new ArrayList<>(operationList.size());
@@ -174,7 +201,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
             if (!successfulPositions.isEmpty()) {
                 try {
-                    shardWriter.writer.commit();
+                    commitAndRefresh(shardWriter);
                 } catch (Exception e) {
                     for (Integer position : successfulPositions) {
                         results.set(position, IndexDocumentOperationResult.failure(e));
@@ -211,34 +238,113 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     @Override
     public SearchResponse search(ShardId shardId, SearchRequest request) throws IOException {
         long started = System.nanoTime();
+        cleanupExpiredRemoteSearchers();
         PitContext pit = pit(request.pitId(), shardId);
         if (pit != null) {
             if (pit.reader() == null) {
                 return emptySearchResponse(started);
             }
-            return searchReader(pit.reader(), request, started);
+            return searchSearcher(new IndexSearcher(pit.reader()), request, started);
         }
         boolean remoteOnly = "remote".equalsIgnoreCase(request.readPreference())
                 || "strong".equalsIgnoreCase(request.readPreference());
         ShardWriter shardWriter = remoteOnly ? null : writers.get(shardId);
         if (shardWriter != null) {
-            synchronized (shardWriter) {
-                try (DirectoryReader reader = DirectoryReader.open(shardWriter.writer)) {
-                    return searchReader(reader, request, started);
-                }
+            IndexSearcher searcher = shardWriter.searcherManager.acquire();
+            try {
+                return searchSearcher(searcher, request, started);
+            } finally {
+                shardWriter.searcherManager.release(searcher);
             }
         }
-        try (S3CachingDirectory directory = openShardDirectory(
+        return searchRemoteSnapshot(shardId, request, started);
+    }
+
+    private SearchResponse searchRemoteSnapshot(ShardId shardId, SearchRequest request, long started) throws IOException {
+        Long generation = request.remoteSnapshotGeneration();
+        if (generation == null) {
+            IndexCommitSnapshot snapshot = metadataManager.latestSnapshot(physicalIndexName(shardId));
+            if (snapshot == null) {
+                return emptySearchResponse(started);
+            }
+            generation = snapshot.getGeneration();
+        }
+        if (generation < 0) {
+            return emptySearchResponse(started);
+        }
+        CachedRemoteSearcher cached = acquireRemoteSearcher(shardId, generation);
+        try {
+            return searchSearcher(cached.searcher(), request, started);
+        } finally {
+            cached.release();
+        }
+    }
+
+    private CachedRemoteSearcher acquireRemoteSearcher(ShardId shardId, long generation) throws IOException {
+        RemoteSearcherKey key = new RemoteSearcherKey(shardId, generation);
+        while (true) {
+            CachedRemoteSearcher cached = remoteSearchers.get(key);
+            if (cached != null && cached.acquire()) {
+                return cached;
+            }
+            CachedRemoteSearcher created = openRemoteSearcher(shardId, generation);
+            CachedRemoteSearcher existing = remoteSearchers.putIfAbsent(key, created);
+            if (existing == null) {
+                created.acquire();
+                return created;
+            }
+            created.close();
+        }
+    }
+
+    private CachedRemoteSearcher openRemoteSearcher(ShardId shardId, long generation) throws IOException {
+        S3CachingDirectory directory = openShardDirectory(
                 shardId,
                 remoteSnapshotStatuses(),
                 false,
-                request.remoteSnapshotGeneration()
+                generation
         );
-             DirectoryReader reader = DirectoryReader.open(directory)) {
-            return searchReader(reader, request, started);
-        } catch (IndexNotFoundException e) {
-            return emptySearchResponse(started);
+        try {
+            DirectoryReader reader = DirectoryReader.open(directory);
+            return new CachedRemoteSearcher(directory, reader, new IndexSearcher(reader));
+        } catch (IOException | RuntimeException e) {
+            directory.close();
+            throw e;
         }
+    }
+
+    private void cleanupExpiredRemoteSearchers() {
+        long now = System.nanoTime();
+        remoteSearchers.forEach((key, searcher) -> {
+            if (searcher.expired(now) && remoteSearchers.remove(key, searcher)) {
+                try {
+                    searcher.close();
+                } catch (IOException ignored) {
+                }
+            }
+        });
+    }
+
+    private void closeRemoteSearchers(ShardId shardId) {
+        remoteSearchers.forEach((key, searcher) -> {
+            if (key.shardId().equals(shardId) && remoteSearchers.remove(key, searcher)) {
+                try {
+                    searcher.close();
+                } catch (IOException ignored) {
+                }
+            }
+        });
+    }
+
+    private void closeRemoteSearchers() {
+        remoteSearchers.forEach((key, searcher) -> {
+            if (remoteSearchers.remove(key, searcher)) {
+                try {
+                    searcher.close();
+                } catch (IOException ignored) {
+                }
+            }
+        });
     }
 
     private SearchResponse emptySearchResponse(long started) {
@@ -253,8 +359,8 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         );
     }
 
-    private SearchResponse searchReader(DirectoryReader reader, SearchRequest request, long started) throws IOException {
-        IndexSearcher searcher = new IndexSearcher(reader);
+    private SearchResponse searchSearcher(IndexSearcher searcher, SearchRequest request, long started) throws IOException {
+        IndexReader reader = searcher.getIndexReader();
         int from = Math.max(0, request.from());
         int size = Math.max(0, request.size());
         Query query = searchQuery(request);
@@ -651,6 +757,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
 
     @Override
     public ByQueryResponse deleteByQuery(ShardId shardId, ByQueryRequest request) throws IOException {
+        rememberMappings(shardId, request.mappings());
         ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
         Query query = query(request.query(), request.mappings());
         long deleted;
@@ -659,7 +766,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 deleted = new IndexSearcher(reader).count(query);
             }
             shardWriter.writer.deleteDocuments(query);
-            shardWriter.writer.commit();
+            commitAndRefresh(shardWriter);
         }
         return new ByQueryResponse(null, "delete_by_query", "deleted=" + deleted);
     }
@@ -669,6 +776,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         if (request.document() == null || request.document().isEmpty()) {
             throw new IllegalArgumentException("update_by_query requires a non-empty doc object");
         }
+        rememberMappings(shardId, request.mappings());
         ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
         Query query = query(request.query(), request.mappings());
         long updated = 0;
@@ -693,7 +801,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                     after = topDocs.scoreDocs[topDocs.scoreDocs.length - 1];
                 }
             }
-            shardWriter.writer.commit();
+            commitAndRefresh(shardWriter);
         }
         return new ByQueryResponse(null, "update_by_query", "updated=" + updated);
     }
@@ -703,7 +811,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
         synchronized (shardWriter) {
             shardWriter.writer.forceMerge(Math.max(1, maxNumSegments));
-            shardWriter.writer.commit();
+            commitAndRefresh(shardWriter);
         }
     }
 
@@ -733,6 +841,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
         }
         for (int shard = 0; shard < numberOfShards; shard++) {
+            closeRemoteSearchers(new ShardId(indexName, shard));
             String physicalIndexName = indexName + "__shard_" + shard;
             try {
                 deleteRecursively(PathUtil.walDataPath(basePath, physicalIndexName));
@@ -791,9 +900,21 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private ShardWriter openShardWriter(ShardId shardId) {
         try {
             S3CachingDirectory directory = openShardDirectory(shardId, remoteSnapshotStatuses());
-            IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+            Analyzer analyzer = new MappingAnalyzer(shardId, mappingsByShard, analyzerRegistry);
+            IndexWriterConfig config = new IndexWriterConfig(analyzer);
             config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
-            return new ShardWriter(directory, new IndexWriter(directory, config));
+            IndexWriter writer = new IndexWriter(directory, config);
+            try {
+                return new ShardWriter(shardId, directory, writer, new SearcherManager(writer, null), analyzer);
+            } catch (IOException | RuntimeException e) {
+                try {
+                    writer.close();
+                } finally {
+                    analyzer.close();
+                    directory.close();
+                }
+                throw e;
+            }
         } catch (IOException e) {
             throw new IllegalStateException("failed to open shard writer: " + shardId.routeKey(), e);
         }
@@ -834,6 +955,17 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
 
     private ManifestManager openManifestManager() {
         return new ManifestManager(manifestOptions, remoteObjectStore, metadataManager, uploadWorkerPool);
+    }
+
+    private void commitAndRefresh(ShardWriter shardWriter) throws IOException {
+        shardWriter.writer.commit();
+        shardWriter.searcherManager.maybeRefreshBlocking();
+    }
+
+    private void rememberMappings(ShardId shardId, Map<String, FieldMapping> mappings) {
+        if (shardId != null && mappings != null && !mappings.isEmpty()) {
+            mappingsByShard.put(shardId, Map.copyOf(mappings));
+        }
     }
 
     private List<IndexFileStatus> remoteSnapshotStatuses() {
@@ -1545,11 +1677,31 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             return exactQuery(field, value, mappings);
         }
         BooleanQuery.Builder builder = new BooleanQuery.Builder();
-        Arrays.stream(String.valueOf(value).toLowerCase().split("\\W+"))
-                .filter(token -> !token.isBlank())
-                .forEach(token -> builder.add(new TermQuery(new Term(field, token)), BooleanClause.Occur.SHOULD));
+        for (String token : analyze(field, value, mapping)) {
+            builder.add(new TermQuery(new Term(field, token)), BooleanClause.Occur.SHOULD);
+        }
         BooleanQuery built = builder.build();
-        return built.clauses().isEmpty() ? MatchAllDocsQuery.INSTANCE : built;
+        return built.clauses().isEmpty() ? new MatchNoDocsQuery("match query produced no analyzer tokens") : built;
+    }
+
+    private List<String> analyze(String field, Object value, FieldMapping mapping) {
+        String analyzerName = mapping.searchAnalyzer() == null ? mapping.analyzer() : mapping.searchAnalyzer();
+        Analyzer analyzer = analyzerRegistry.analyzer(analyzerName);
+        List<String> tokens = new ArrayList<>();
+        try (TokenStream stream = analyzer.tokenStream(field, String.valueOf(value))) {
+            CharTermAttribute term = stream.addAttribute(CharTermAttribute.class);
+            stream.reset();
+            while (stream.incrementToken()) {
+                String token = term.toString();
+                if (!token.isBlank()) {
+                    tokens.add(token);
+                }
+            }
+            stream.end();
+        } catch (IOException e) {
+            throw new IllegalArgumentException("failed to analyze query for field: " + field, e);
+        }
+        return tokens;
     }
 
     private Query rangeQuery(String field, Map<?, ?> bounds, Map<String, FieldMapping> mappings) {
@@ -2065,6 +2217,8 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
         }
         writers.clear();
+        closeRemoteSearchers();
+        analyzerRegistry.close();
         uploadWorkerPool.shutdown();
         try {
             if (!uploadWorkerPool.awaitTermination(30, TimeUnit.SECONDS)) {
@@ -2079,14 +2233,106 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         }
     }
 
-    private record ShardWriter(S3CachingDirectory directory, IndexWriter writer) implements AutoCloseable {
+    private record RemoteSearcherKey(ShardId shardId, long generation) {
+    }
+
+    private static final class CachedRemoteSearcher implements AutoCloseable {
+        private final S3CachingDirectory directory;
+        private final DirectoryReader reader;
+        private final IndexSearcher searcher;
+        private final AtomicInteger references = new AtomicInteger();
+        private volatile boolean closed;
+        private volatile long lastAccessNanos = System.nanoTime();
+
+        private CachedRemoteSearcher(
+                S3CachingDirectory directory,
+                DirectoryReader reader,
+                IndexSearcher searcher
+        ) {
+            this.directory = directory;
+            this.reader = reader;
+            this.searcher = searcher;
+        }
+
+        private synchronized boolean acquire() {
+            if (closed) {
+                return false;
+            }
+            references.incrementAndGet();
+            long now = System.nanoTime();
+            lastAccessNanos = now;
+            return true;
+        }
+
+        private void release() {
+            references.decrementAndGet();
+        }
+
+        private IndexSearcher searcher() {
+            return searcher;
+        }
+
+        private boolean expired(long now) {
+            return references.get() == 0 && now - lastAccessNanos > REMOTE_SEARCHER_CACHE_TTL.toNanos();
+        }
+
+        @Override
+        public synchronized void close() throws IOException {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            IOException failure = null;
+            try {
+                reader.close();
+            } catch (IOException e) {
+                failure = e;
+            }
+            try {
+                directory.close();
+            } catch (IOException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
+    }
+
+    private record ShardWriter(
+            ShardId shardId,
+            S3CachingDirectory directory,
+            IndexWriter writer,
+            SearcherManager searcherManager,
+            Analyzer analyzer
+    ) implements AutoCloseable {
         @Override
         public void close() throws IOException {
-            try {
-                writer.close();
-            } finally {
-                directory.close();
+            IOException failure = null;
+            failure = close(failure, searcherManager);
+            failure = close(failure, writer);
+            analyzer.close();
+            failure = close(failure, directory);
+            if (failure != null) {
+                throw failure;
             }
+        }
+
+        private IOException close(IOException failure, AutoCloseable closeable) {
+            try {
+                closeable.close();
+            } catch (Exception e) {
+                IOException ioException = e instanceof IOException io ? io : new IOException(e);
+                if (failure == null) {
+                    return ioException;
+                }
+                failure.addSuppressed(ioException);
+            }
+            return failure;
         }
     }
 

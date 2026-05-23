@@ -283,6 +283,7 @@ final class ClusterMaintenanceService {
         if (!clusterCoordinator.isMaster()) {
             return;
         }
+        retryPendingIndexDeletes(state);
         runDeleteLifecyclePolicies(state, now);
     }
 
@@ -327,6 +328,9 @@ final class ClusterMaintenanceService {
 
     private void runDeleteLifecyclePolicies(ClusterState state, Instant now) {
         state.indices().forEach((indexName, settings) -> {
+            if (settings.deletePending()) {
+                return;
+            }
             IndexLifecyclePolicy policy = lifecyclePolicy(state, settings.lifecyclePolicy());
             if (policy == null) {
                 return;
@@ -344,6 +348,22 @@ final class ClusterMaintenanceService {
                 log.info("deleted index {} by lifecycle policy {}", indexName, policy.name());
             } catch (Exception e) {
                 log.warn("failed to delete index {} by lifecycle policy {}", indexName, policy.name(), e);
+            } finally {
+                lifecycleDeletesInProgress.remove(indexName);
+            }
+        });
+    }
+
+    private void retryPendingIndexDeletes(ClusterState state) {
+        state.indices().forEach((indexName, settings) -> {
+            if (!settings.deletePending() || !lifecycleDeletesInProgress.add(indexName)) {
+                return;
+            }
+            try {
+                indexDataDeleter.deleteIndexAndData(indexName, settings.numberOfShards());
+                log.info("completed pending delete for index {}", indexName);
+            } catch (Exception e) {
+                log.warn("failed to complete pending delete for index {}", indexName, e);
             } finally {
                 lifecycleDeletesInProgress.remove(indexName);
             }

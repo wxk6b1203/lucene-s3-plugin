@@ -101,6 +101,9 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--upload-wait-timeout"}, description = "Timeout in seconds when upload wait strategy waits for committed files")
     private int uploadWaitTimeoutSeconds = 30;
 
+    @CommandLine.Option(names = {"--analyzer-plugin-path"}, description = "Directory or jar file containing third-party Lucene Analyzer plugins")
+    private String analyzerPluginPath;
+
     @Override
     public Integer call() {
         log.info("Starting Lucene S3 Server with config file: {}", configFile);
@@ -181,6 +184,9 @@ public class Server implements Callable<Integer> {
                         "uploadWaitTimeoutSeconds", "upload.waitTimeoutSeconds", "upload.wait.timeout.seconds",
                         "server.uploadWaitTimeoutSeconds", "server.upload.waitTimeoutSeconds",
                         "server.upload.wait.timeout.seconds")),
+                optionValue("--analyzer-plugin-path", analyzerPluginPath, () -> config.stringValue(analyzerPluginPath,
+                        "analyzerPluginPath", "analyzer.pluginPath", "analyzer.plugin.path",
+                        "server.analyzerPluginPath", "server.analyzer.pluginPath", "server.analyzer.plugin.path")),
                 optionValue("--cache-max-bytes", cacheMaxBytes, () -> config.longValue(cacheMaxBytes,
                         "cacheMaxBytes", "cache.maxBytes", "cache.max.bytes",
                         "server.cacheMaxBytes", "server.cache.maxBytes", "server.cache.max.bytes")),

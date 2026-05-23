@@ -27,6 +27,7 @@ public record ServerOptions(
         int httpForwardTimeoutSeconds,
         String uploadWaitStrategy,
         int uploadWaitTimeoutSeconds,
+        String analyzerPluginPath,
         long cacheMaxBytes,
         int cacheCleanupIntervalSeconds,
         int metricsPort
@@ -38,6 +39,9 @@ public record ServerOptions(
                 ? "async"
                 : uploadWaitStrategy.trim();
         uploadWaitTimeoutSeconds = Math.max(1, uploadWaitTimeoutSeconds);
+        analyzerPluginPath = analyzerPluginPath == null || analyzerPluginPath.isBlank()
+                ? null
+                : analyzerPluginPath.trim();
         cacheMaxBytes = Math.max(0, cacheMaxBytes);
         cacheCleanupIntervalSeconds = Math.max(1, cacheCleanupIntervalSeconds);
         metricsPort = Math.max(0, metricsPort);
@@ -85,6 +89,7 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                null,
                 0,
                 60,
                 0
@@ -134,6 +139,7 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                null,
                 0,
                 60,
                 0
@@ -185,6 +191,7 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                null,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
                 0
@@ -237,6 +244,7 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                null,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
                 metricsPort

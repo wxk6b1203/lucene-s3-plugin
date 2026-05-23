@@ -211,6 +211,7 @@ Windows 使用：
 | `--data-path` | `data` | 本地 WAL、共享缓存和本地 fallback 对象存储目录。 |
 | `--cache-max-bytes` | `0` | 本地 remote snapshot 缓存容量上限。`0` 表示不按容量主动淘汰。 |
 | `--cache-cleanup-interval` | `60` | 本地 remote snapshot 缓存后台清理间隔，单位秒。 |
+| `--analyzer-plugin-path` | 空 | 第三方 Lucene Analyzer 插件目录或 jar 文件路径。目录下的 jar 或 class 目录会被独立 classloader 加载。 |
 | `--s3-bucket` | 空 | S3 bucket。为空时启用本地 `remote-objects` fallback。 |
 | `--s3-region` | 空 | S3 region。未指定时走 AWS SDK 默认配置。 |
 | `--s3-protocol` | `https` | 当 `--s3-endpoint` 未包含 scheme 时使用的协议，可选 `http` 或 `https`。若 endpoint 已写 `http://` 或 `https://`，以 endpoint 为准。 |
@@ -248,6 +249,8 @@ server:
   cache:
     maxBytes: 10737418240
     cleanupIntervalSeconds: 60
+  analyzer:
+    pluginPath: plugins/analyzers
   upload:
     waitStrategy: async
     waitTimeoutSeconds: 30
@@ -304,7 +307,7 @@ curl http://127.0.0.1:9200/_snapshot_status
 curl http://127.0.0.1:9300/metrics
 ```
 
-当前暴露 HTTP 请求数/耗时、活跃请求、shard 状态、pending/stuck uploads、PIT 数、本地 remote cache 命中和 S3 操作/错误计数。
+当前暴露 HTTP 请求数/总耗时、HTTP 阶段耗时、节点间内部 HTTP 耗时、活跃请求、shard 状态、pending/stuck uploads、PIT 数、本地 remote cache 命中，以及 S3 操作/错误/耗时累计计数。
 
 查看某个 routing 会写到哪个节点：
 
@@ -344,7 +347,7 @@ curl -X PUT http://127.0.0.1:9200/books \
 支持的 mapping 类型：
 
 - `keyword`: 精确匹配，默认开启 doc values，可排序和聚合。
-- `text`: 使用 `StandardAnalyzer` 分词，默认不开启 doc values。
+- `text`: 默认使用 `standard` 分词，默认不开启 doc values，可配置 `analyzer` 和 `search_analyzer`。
 - `long`, `integer`, `double`, `float`: 数值查询、排序、聚合。
 - `boolean`: 布尔查询、排序、聚合。
 - `dense_vector`: 向量检索字段，需要 `dimension` 或 `dims`，可选 `similarity`。
@@ -358,6 +361,28 @@ curl -X PUT http://127.0.0.1:9200/books \
 - `indexed` 或 `index`: 是否建索引，默认 `true`。
 - `stored` 或 `store`: 是否 stored，默认 `true`。
 - `doc_values` 或 `docValues`: 是否开启 doc values；keyword、数字、boolean 默认开启。
+- `analyzer`: `text` 字段的索引 analyzer，默认 `standard`。
+- `search_analyzer` 或 `searchAnalyzer`: `text` 字段的查询 analyzer，默认跟 `analyzer` 一致。
+
+内置 analyzer 名称包括 `standard`, `keyword`, `whitespace`, `simple`, `stop`, `english`。第三方 analyzer 可以用 `class:<fully-qualified-class-name>` 指定，只要对应 jar 在运行时 classpath 中即可；也可以通过 `--analyzer-plugin-path` / `server.analyzer.pluginPath` 指向插件目录，目录下的 jar 或 class 目录会被加载。系统也预留了 `ik`, `ik_smart`, `ik_max_word`, `pinyin` 别名。示例：
+
+```json
+{
+  "mappings": {
+    "properties": {
+      "title": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart"
+      },
+      "suggest": {
+        "type": "text",
+        "analyzer": "class:com.example.lucene.PinyinAnalyzer"
+      }
+    }
+  }
+}
+```
 
 追加 mapping：
 
@@ -384,6 +409,8 @@ curl http://127.0.0.1:9200/books/_mapping
 ```bash
 curl -X DELETE http://127.0.0.1:9200/books
 ```
+
+删除索引会先在 cluster state 中标记删除中的 tombstone，再删除本地 shard 数据、远端对象和 manifest metadata，全部成功后才最终移除 index metadata。若中途失败，后台维护任务会继续重试这个 pending delete。
 
 ### 写入文档
 

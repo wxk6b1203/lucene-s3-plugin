@@ -65,6 +65,8 @@ public class HttpApiServer implements AutoCloseable {
     private static final String OWNER_TERM_HEADER = "x-lucene-s3-owner-term";
     private static final String ALLOCATION_EPOCH_HEADER = "x-lucene-s3-allocation-epoch";
     private static final String DOCUMENT_ID_HEADER = "x-lucene-s3-document-id";
+    private static final String REQUEST_START_NANOS = "lucene-s3.request-start-nanos";
+    private static final String STAGE_MARK_NANOS = "lucene-s3.stage-mark-nanos";
 
     private final Vertx vertx;
     private final int port;
@@ -183,7 +185,8 @@ public class HttpApiServer implements AutoCloseable {
                         options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
                         UploadWaitStrategy.parse(options.uploadWaitStrategy()),
                         Duration.ofSeconds(options.uploadWaitTimeoutSeconds())
-                )
+                ),
+                options.analyzerPluginPath() == null ? null : Path.of(options.analyzerPluginPath())
         );
         this.maintenanceService = new ClusterMaintenanceService(
                 clusterStateRepository,
@@ -250,6 +253,8 @@ public class HttpApiServer implements AutoCloseable {
 
     private void recordMetrics(RoutingContext context) {
         long started = System.nanoTime();
+        context.put(REQUEST_START_NANOS, started);
+        context.put(STAGE_MARK_NANOS, started);
         serverMetrics.requestStarted();
         context.response().bodyEndHandler(ignored -> serverMetrics.requestFinished(
                 context.request().method().name(),
@@ -260,10 +265,46 @@ public class HttpApiServer implements AutoCloseable {
         context.next();
     }
 
+    private void recordBodyReadStage(RoutingContext context) {
+        recordStage(context, "body_read");
+        context.next();
+    }
+
+    private void recordStage(RoutingContext context, String stage) {
+        Long mark = context.get(STAGE_MARK_NANOS);
+        long now = System.nanoTime();
+        if (mark != null && now >= mark) {
+            serverMetrics.requestStageFinished(
+                    context.request().method().name(),
+                    context.normalizedPath(),
+                    stage,
+                    now - mark
+            );
+        }
+        context.put(STAGE_MARK_NANOS, now);
+    }
+
+    private <T> T measured(RoutingContext context, String stage, MeasuredSupplier<T> supplier) throws Exception {
+        try {
+            return supplier.get();
+        } finally {
+            recordStage(context, stage);
+        }
+    }
+
+    private void jsonMeasured(RoutingContext context, int status, Object body) {
+        try {
+            json(context, status, body);
+        } finally {
+            recordStage(context, "response_write");
+        }
+    }
+
     public Future<HttpServer> start() {
         Router router = Router.router(vertx);
         router.route().handler(this::recordMetrics);
         router.route().handler(BodyHandler.create());
+        router.route().handler(this::recordBodyReadStage);
 
         router.post("/_internal/:index/:shard/_search").blockingHandler(this::internalShardSearch, false);
         router.post("/_internal/:index/:shard/_pit").blockingHandler(this::internalShardOpenPit, false);
@@ -555,7 +596,10 @@ public class HttpApiServer implements AutoCloseable {
             }
             requireMaster();
             String index = context.pathParam("index");
-            IndexSettings settings = indexSettings(index, clusterStateRepository.current());
+            IndexSettings settings = clusterStateRepository.current().indices().get(index);
+            if (settings == null) {
+                throw new IllegalArgumentException("index not found: " + index);
+            }
             ClusterState state = deleteIndexAndData(index, settings.numberOfShards());
             json(context, 200, state);
         } catch (Exception e) {
@@ -682,14 +726,14 @@ public class HttpApiServer implements AutoCloseable {
     private void bulk(RoutingContext context) {
         long started = System.nanoTime();
         try {
-            List<BulkItemRequest> items = bulkItems(context);
-            ClusterState state = writableClusterState(context);
+            List<BulkItemRequest> items = measured(context, "parse", () -> bulkItems(context));
+            ClusterState state = measured(context, "cluster_state", () -> writableClusterState(context));
             if (state == null) {
                 return;
             }
-            List<Future<List<BulkItemResult>>> futures = executeBulkItems(items, state);
+            List<Future<List<BulkItemResult>>> futures = measured(context, "plan", () -> executeBulkItems(items, state));
             if (futures.isEmpty()) {
-                json(context, 200, Map.of(
+                jsonMeasured(context, 200, Map.of(
                         "took", (System.nanoTime() - started) / 1_000_000,
                         "errors", false,
                         "items", List.of()
@@ -698,6 +742,7 @@ public class HttpApiServer implements AutoCloseable {
             }
             Future.all(futures)
                     .onSuccess(ignored -> {
+                        recordStage(context, "shard_execute");
                         BulkItemResponse[] orderedResponses = new BulkItemResponse[items.size()];
                         futures.stream()
                                 .flatMap(future -> future.result().stream())
@@ -707,7 +752,7 @@ public class HttpApiServer implements AutoCloseable {
                                 .toList();
                         boolean errors = Arrays.stream(orderedResponses)
                                 .anyMatch(BulkItemResponse::failed);
-                        json(context, 200, Map.of(
+                        jsonMeasured(context, 200, Map.of(
                                 "took", (System.nanoTime() - started) / 1_000_000,
                                 "errors", errors,
                                 "items", responses
@@ -724,20 +769,29 @@ public class HttpApiServer implements AutoCloseable {
 
     private void search(RoutingContext context) {
         try {
-            SearchRequest request = searchRequest(context);
-            ClusterState state = clusterStateRepository.current();
-            Map<String, FieldMapping> mappings = indexSettings(request.indexName(), state).mappings();
-            validateVectorQuery(request.vector(), mappings);
+            SearchRequest request = measured(context, "parse", () -> searchRequest(context));
+            ClusterState state = measured(context, "cluster_state", clusterStateRepository::current);
+            SearchRequest parsedRequest = request;
+            Map<String, FieldMapping> mappings = measured(context, "mapping", () -> indexSettings(parsedRequest.indexName(), state).mappings());
+            SearchRequest validatingRequest = request;
+            measured(context, "validate", () -> {
+                validateVectorQuery(validatingRequest.vector(), mappings);
+                return null;
+            });
             request = withMappings(request, mappings);
-            CoordinatingPit pit = coordinatingPit(request.pitId());
+            SearchRequest mappedRequest = request;
+            CoordinatingPit pit = measured(context, "pit_lookup", () -> coordinatingPit(mappedRequest.pitId()));
             if (pit != null && !pit.indexName().equals(request.indexName())) {
                 throw new IllegalArgumentException("point in time does not belong to index: " + request.indexName());
             }
-            SearchPlan plan = pit == null
-                    ? searchPlan(request, state)
-                    : new SearchPlan(request.indexName(), request.routing(), state.version(), pit.targets());
+            SearchPlan plan = measured(context, "plan", () -> pit == null
+                    ? searchPlan(mappedRequest, state)
+                    : new SearchPlan(mappedRequest.indexName(), mappedRequest.routing(), state.version(), pit.targets()));
             executeSearchPlan(plan, request, pit)
-                    .onSuccess(response -> json(context, 200, response))
+                    .onSuccess(response -> {
+                        recordStage(context, "shard_execute");
+                        jsonMeasured(context, 200, response);
+                    })
                     .onFailure(e -> {
                         Exception exception = exception(e);
                         error(context, status(exception), exception);
@@ -2045,6 +2099,9 @@ public class HttpApiServer implements AutoCloseable {
         if (settings == null) {
             throw new IllegalArgumentException("index not found: " + index);
         }
+        if (settings.deletePending()) {
+            throw new IllegalArgumentException("index is deleting: " + index);
+        }
         return settings;
     }
 
@@ -2139,7 +2196,7 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private ClusterState deleteIndexAndData(String indexName, int numberOfShards) throws IOException {
-        ClusterState state = indexService.deleteIndex(indexName);
+        indexService.markIndexDeleting(indexName);
         localShardIndexService.deleteIndex(indexName, numberOfShards);
         try (ManifestManager manifestManager = new ManifestManager(
                 new ManifestOptions(""),
@@ -2148,7 +2205,7 @@ public class HttpApiServer implements AutoCloseable {
         )) {
             manifestManager.deleteIndexShards(indexName, numberOfShards);
         }
-        return state;
+        return indexService.deleteIndex(indexName);
     }
 
     private void requireMaster() {
@@ -2183,6 +2240,7 @@ public class HttpApiServer implements AutoCloseable {
             String uri,
             Object body
     ) {
+        long started = System.nanoTime();
         Context requestContext = Vertx.currentContext();
         Promise<RemoteHttpResponse> promise = Promise.promise();
         HttpRequest.BodyPublisher publisher = body == null
@@ -2201,9 +2259,11 @@ public class HttpApiServer implements AutoCloseable {
                 .whenComplete((response, throwable) -> runOnRequestContext(requestContext, () -> {
                     if (throwable != null) {
                         Throwable cause = throwable.getCause() == null ? throwable : throwable.getCause();
+                        serverMetrics.internalHttpFinished(method, uri, 0, System.nanoTime() - started);
                         promise.fail(cause);
                         return;
                     }
+                    serverMetrics.internalHttpFinished(method, uri, response.statusCode(), System.nanoTime() - started);
                     promise.complete(new RemoteHttpResponse(response.statusCode(), response.body()));
                 }));
         return promise.future();
@@ -2220,6 +2280,7 @@ public class HttpApiServer implements AutoCloseable {
             int targetPort,
             Map<String, String> extraHeaders
     ) {
+        long started = System.nanoTime();
         Context requestContext = Vertx.currentContext();
         String body = context.body() == null ? null : context.body().asString();
         HttpRequest.BodyPublisher publisher = body == null || body.isEmpty()
@@ -2244,6 +2305,12 @@ public class HttpApiServer implements AutoCloseable {
                 .whenComplete((response, throwable) -> runOnRequestContext(requestContext, () -> {
                     if (throwable != null) {
                         Throwable cause = throwable.getCause() == null ? throwable : throwable.getCause();
+                        serverMetrics.internalHttpFinished(
+                                context.request().method().name(),
+                                context.normalizedPath(),
+                                0,
+                                System.nanoTime() - started
+                        );
                         Exception exception = cause instanceof Exception e ? e : new RuntimeException(cause);
                         log.warn("forward failed node={} target={} address={}:{} uri={}",
                                 localNode.id(), targetNodeId, targetHost, targetPort, context.request().uri(), exception);
@@ -2254,6 +2321,12 @@ public class HttpApiServer implements AutoCloseable {
                         ));
                         return;
                     }
+                    serverMetrics.internalHttpFinished(
+                            context.request().method().name(),
+                            context.normalizedPath(),
+                            response.statusCode(),
+                            System.nanoTime() - started
+                    );
                     log.debug("forward response node={} target={} uri={} status={}",
                             localNode.id(), targetNodeId, context.request().uri(), response.statusCode());
                     context.response().setStatusCode(response.statusCode());
@@ -2383,6 +2456,10 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private record RemoteHttpResponse(int statusCode, String body) {
+    }
+
+    private interface MeasuredSupplier<T> {
+        T get() throws Exception;
     }
 
     @Override

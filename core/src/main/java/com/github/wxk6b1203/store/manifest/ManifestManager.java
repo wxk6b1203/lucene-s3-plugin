@@ -30,6 +30,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -44,6 +45,7 @@ public class ManifestManager implements AutoCloseable {
     private final RemoteObjectStore remoteObjectStore;
     private final ManifestMetadataManager metadataManager;
     private final boolean closeUploadWorkerPool;
+    private final List<CompletableFuture<Boolean>> pendingUploads = new CopyOnWriteArrayList<>();
     private ExecutorService uploadWorkerPool;
 
     public ManifestManager(ManifestOptions options, S3Client s3Client, ManifestMetadataManager metadataManager) {
@@ -150,6 +152,7 @@ public class ManifestManager implements AutoCloseable {
                     () -> uploadCommit(pendingUploads, snapshotCommit),
                     uploadWorkerPool()
             );
+            trackUpload(upload);
             if (options.uploadWaitStrategy() == UploadWaitStrategy.WAIT_FOR_UPLOAD) {
                 waitForUpload(upload, snapshotCommit);
             }
@@ -524,6 +527,24 @@ public class ManifestManager implements AutoCloseable {
         return uploadWorkerPool;
     }
 
+    private void trackUpload(CompletableFuture<Boolean> upload) {
+        pendingUploads.add(upload);
+        upload.whenComplete((ignored, throwable) -> pendingUploads.remove(upload));
+    }
+
+    private void waitForPendingUploadsOnClose() {
+        for (CompletableFuture<Boolean> upload : List.copyOf(pendingUploads)) {
+            try {
+                upload.get(options.uploadWaitTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (ExecutionException | TimeoutException e) {
+                log.warn("pending manifest upload did not complete before manager close", e);
+            }
+        }
+    }
+
     private record PendingUpload(Path source, IndexFileMetadata metadata) {
     }
 
@@ -538,6 +559,7 @@ public class ManifestManager implements AutoCloseable {
 
     @Override
     public void close() {
+        waitForPendingUploadsOnClose();
         if (uploadWorkerPool == null || !closeUploadWorkerPool) {
             return;
         }

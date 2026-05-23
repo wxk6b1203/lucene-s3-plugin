@@ -20,6 +20,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -189,6 +190,31 @@ public class ManifestManagerTest {
 
         assertEquals(2, remote.puts.size());
         assertTrue(remote.puts.get(1).startsWith("books/_data/segments_1."));
+    }
+
+    @Test
+    public void testCloseWaitsForPendingAsyncUpload() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        BlockingRemoteObjectStore remote = new BlockingRemoteObjectStore("_0.si");
+        ManifestManager manager = new ManifestManager(new ManifestOptions("bucket"), remote, metadata);
+        Path data = tempDir.resolve("_0.si");
+        Path segments = tempDir.resolve("segments_1");
+        Files.write(data, new byte[]{1});
+        Files.write(segments, new byte[]{2});
+
+        manager.commit(List.of(
+                new CommittingIndexFile("books", data),
+                new CommittingIndexFile("books", segments)
+        ));
+        assertTrue(remote.awaitBlockedPut());
+
+        CompletableFuture<Void> close = CompletableFuture.runAsync(manager::close);
+        Thread.sleep(200);
+        assertFalse(close.isDone());
+
+        remote.releaseBlockedPut();
+        close.get(5, TimeUnit.SECONDS);
+        assertEquals(IndexFileStatus.CLEAN, metadata.fileMetadata("books", "segments_1").getStatus());
     }
 
     @Test

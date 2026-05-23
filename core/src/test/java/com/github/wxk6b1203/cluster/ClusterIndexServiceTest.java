@@ -2,6 +2,7 @@ package com.github.wxk6b1203.cluster;
 
 import com.github.wxk6b1203.search.SearchPlanner;
 import com.github.wxk6b1203.search.SearchRequest;
+import com.github.wxk6b1203.util.JsonUtil;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -14,6 +15,33 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class ClusterIndexServiceTest {
+    @Test
+    public void testIndexSettingsDeserializesStateWrittenBeforeDeletePendingField() {
+        ClusterState state = JsonUtil.readValue("""
+                {
+                  "clusterName": "test",
+                  "version": 1,
+                  "masterNodeId": "node-1",
+                  "nodes": {},
+                  "indices": {
+                    "books": {
+                      "name": "books",
+                      "numberOfShards": 1,
+                      "lifecyclePolicy": null,
+                      "createdAt": "2026-05-23T00:00:00Z",
+                      "mappings": {}
+                    }
+                  },
+                  "routingTable": [],
+                  "lifecyclePolicies": {},
+                  "updatedAt": "2026-05-23T00:00:00Z"
+                }
+                """, ClusterState.class);
+
+        assertEquals(false, state.indices().get("books").deletePending());
+        assertEquals(null, state.indices().get("books").deleteStartedAt());
+    }
+
     @Test
     public void testCreateIndexAllocatesShardOwnersToDataNode() throws Exception {
         ClusterNode node = new ClusterNode(
@@ -109,6 +137,26 @@ public class ClusterIndexServiceTest {
                 IllegalArgumentException.class,
                 () -> service.putMapping("books", Map.of("title", new FieldMapping("keyword", null, null, true, true)))
         );
+    }
+
+    @Test
+    public void testMarkIndexDeletingKeepsTombstoneUntilFinalRemoval() throws Exception {
+        ClusterNode node = dataNode("node-1");
+        InMemoryClusterStateRepository repository = new InMemoryClusterStateRepository("test", node);
+        DefaultClusterIndexService service = new DefaultClusterIndexService(repository);
+        service.createIndex(new IndexSettings("books", 1, null, Instant.now()));
+
+        ClusterState deleting = service.markIndexDeleting("books");
+
+        assertEquals(true, deleting.indices().get("books").deletePending());
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> service.putMapping("books", Map.of("title", new FieldMapping("keyword", null, null, true, true)))
+        );
+
+        ClusterState removed = service.deleteIndex("books");
+
+        assertEquals(false, removed.indices().containsKey("books"));
     }
 
     @Test

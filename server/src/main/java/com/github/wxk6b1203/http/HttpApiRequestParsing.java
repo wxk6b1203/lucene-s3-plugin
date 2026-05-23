@@ -41,7 +41,11 @@ final class HttpApiRequestParsing {
                         booleanObject(fieldSpec.containsKey("indexed") ? fieldSpec.get("indexed") : fieldSpec.get("index")),
                         booleanObject(fieldSpec.containsKey("stored") ? fieldSpec.get("stored") : fieldSpec.get("store")),
                         booleanObject(fieldSpec.containsKey("doc_values") ? fieldSpec.get("doc_values") : fieldSpec.get("docValues")),
-                        booleanObject(fieldSpec.containsKey("multi_valued") ? fieldSpec.get("multi_valued") : fieldSpec.get("multiValued"))
+                        booleanObject(fieldSpec.containsKey("multi_valued") ? fieldSpec.get("multi_valued") : fieldSpec.get("multiValued")),
+                        stringValue(fieldSpec.get("analyzer")),
+                        stringValue(fieldSpec.containsKey("search_analyzer")
+                                ? fieldSpec.get("search_analyzer")
+                                : fieldSpec.get("searchAnalyzer"))
                 ));
             }
         });

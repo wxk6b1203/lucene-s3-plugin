@@ -19,6 +19,8 @@ final class ServerMetrics implements AutoCloseable {
     private final PrometheusRegistry registry = new PrometheusRegistry();
     private final Counter httpRequests;
     private final Histogram httpRequestDuration;
+    private final Histogram httpStageDuration;
+    private final Histogram internalHttpDuration;
     private final Gauge activeHttpRequests;
     private final Gauge clusterShards;
     private final Gauge uploadShards;
@@ -37,6 +39,18 @@ final class ServerMetrics implements AutoCloseable {
         this.httpRequestDuration = Histogram.builder()
                 .name("lucene_s3_http_request_duration_seconds")
                 .help("HTTP request duration in seconds.")
+                .labelNames("method", "route", "status")
+                .classicUpperBounds(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30)
+                .register(registry);
+        this.httpStageDuration = Histogram.builder()
+                .name("lucene_s3_http_stage_duration_seconds")
+                .help("HTTP request stage duration in seconds.")
+                .labelNames("method", "route", "stage")
+                .classicUpperBounds(0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+                .register(registry);
+        this.internalHttpDuration = Histogram.builder()
+                .name("lucene_s3_internal_http_duration_seconds")
+                .help("Internal node-to-node HTTP request duration in seconds.")
                 .labelNames("method", "route", "status")
                 .classicUpperBounds(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30)
                 .register(registry);
@@ -89,6 +103,17 @@ final class ServerMetrics implements AutoCloseable {
         counter.inc();
         DistributionDataPoint duration = httpRequestDuration.labelValues(method, route, statusClass);
         duration.observe(durationNanos / 1_000_000_000.0);
+    }
+
+    void requestStageFinished(String method, String path, String stage, long durationNanos) {
+        httpStageDuration.labelValues(method, normalizePath(path), stage)
+                .observe(durationNanos / 1_000_000_000.0);
+    }
+
+    void internalHttpFinished(String method, String path, int status, long durationNanos) {
+        String statusClass = status <= 0 ? "unknown" : (status / 100) + "xx";
+        internalHttpDuration.labelValues(method, normalizePath(path), statusClass)
+                .observe(durationNanos / 1_000_000_000.0);
     }
 
     void setClusterHealth(long activeShards, long unassignedShards, long pendingUploadShards, long stuckUploadShards) {

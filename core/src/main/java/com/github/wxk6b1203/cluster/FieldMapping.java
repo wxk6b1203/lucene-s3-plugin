@@ -7,10 +7,12 @@ public record FieldMapping(
         Boolean indexed,
         Boolean stored,
         Boolean docValues,
-        Boolean multiValued
+        Boolean multiValued,
+        String analyzer,
+        String searchAnalyzer
 ) {
     public FieldMapping(String type, Integer dimension, String similarity, Boolean indexed, Boolean stored) {
-        this(type, dimension, similarity, indexed, stored, null, null);
+        this(type, dimension, similarity, indexed, stored, null, null, null, null);
     }
 
     public FieldMapping(
@@ -21,12 +23,26 @@ public record FieldMapping(
             Boolean stored,
             Boolean docValues
     ) {
-        this(type, dimension, similarity, indexed, stored, docValues, null);
+        this(type, dimension, similarity, indexed, stored, docValues, null, null, null);
+    }
+
+    public FieldMapping(
+            String type,
+            Integer dimension,
+            String similarity,
+            Boolean indexed,
+            Boolean stored,
+            Boolean docValues,
+            Boolean multiValued
+    ) {
+        this(type, dimension, similarity, indexed, stored, docValues, multiValued, null, null);
     }
 
     public FieldMapping {
         type = normalize(type, "keyword");
         similarity = normalize(similarity, "cosine");
+        analyzer = blankToNull(analyzer);
+        searchAnalyzer = blankToNull(searchAnalyzer);
         indexed = indexed == null || indexed;
         stored = stored == null || stored;
         docValues = docValues == null ? defaultDocValues(type) : docValues;
@@ -104,6 +120,10 @@ public record FieldMapping(
 
     private static String normalize(String value, String defaultValue) {
         return value == null || value.isBlank() ? defaultValue : value.trim().toLowerCase();
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
     private static boolean supportedType(String type) {
