@@ -1,18 +1,18 @@
 {
   "base_url": "http://127.0.0.1:9200",
   "index": "stress_books",
-  "duration_seconds": 30,
-  "started_at_epoch_seconds": 1779641007.831211,
-  "finished_at_epoch_seconds": 1779641051.88752,
+  "duration_seconds": 10,
+  "started_at_epoch_seconds": 1779642031.2627368,
+  "finished_at_epoch_seconds": 1779642251.3175669,
   "options": {
     "shards": 3,
     "bulk_size": 50,
     "write_workers": 2,
-    "read_workers": 4,
+    "read_workers": 2,
     "knn_workers": 1,
     "observe_workers": 1,
     "search_size": 10,
-    "warmup_docs": 500,
+    "warmup_docs": 5000,
     "reset_index": false,
     "categories": [
       "search",
@@ -27,232 +27,232 @@
   "metrics": {
     "operations": {
       "aggregation_search": {
-        "count": 131,
+        "count": 2,
         "statuses": {
-          "200": 131
+          "200": 2
         },
         "errors": [],
-        "bytes_received": 67732,
+        "bytes_received": 1039,
         "latency_ms": {
-          "min": 52.357,
-          "avg": 177.035,
-          "p50": 85.045,
-          "p90": 366.039,
-          "p95": 913.757,
-          "p99": 1073.478,
-          "max": 1207.604
+          "min": 1278.832,
+          "avg": 3047.175,
+          "p50": 3047.175,
+          "p90": 4461.849,
+          "p95": 4638.683,
+          "p99": 4780.15,
+          "max": 4815.517
         }
       },
       "bulk_write": {
-        "count": 26,
+        "count": 8,
         "statuses": {
-          "200": 26
+          "200": 8
         },
         "errors": [],
-        "bytes_received": 192628,
+        "bytes_received": 59194,
         "latency_ms": {
-          "min": 1490.117,
-          "avg": 2352.544,
-          "p50": 2062.047,
-          "p90": 3660.343,
-          "p95": 3785.321,
-          "p99": 3837.264,
-          "max": 3852.834
+          "min": 2079.853,
+          "avg": 2982.203,
+          "p50": 2518.42,
+          "p90": 4099.639,
+          "p95": 4341.879,
+          "p99": 4535.671,
+          "max": 4584.119
         }
       },
       "knn_search": {
-        "count": 214,
+        "count": 17,
         "statuses": {
-          "200": 214
+          "200": 17
         },
         "errors": [],
-        "bytes_received": 813618,
+        "bytes_received": 63891,
         "latency_ms": {
-          "min": 42.231,
-          "avg": 145.1,
-          "p50": 78.189,
-          "p90": 262.146,
-          "p95": 394.799,
-          "p99": 1195.017,
-          "max": 2238.219
+          "min": 103.029,
+          "avg": 591.094,
+          "p50": 115.627,
+          "p90": 1288.817,
+          "p95": 1989.967,
+          "p99": 4219.992,
+          "max": 4777.498
         }
       },
       "observe /_cluster/health": {
-        "count": 5,
+        "count": 2,
         "statuses": {
-          "200": 5
+          "200": 2
         },
         "errors": [],
-        "bytes_received": 1105,
+        "bytes_received": 442,
         "latency_ms": {
-          "min": 148.317,
-          "avg": 179.364,
-          "p50": 171.467,
-          "p90": 207.796,
-          "p95": 207.891,
-          "p99": 207.968,
-          "max": 207.987
+          "min": 218.292,
+          "avg": 222.032,
+          "p50": 222.032,
+          "p90": 225.025,
+          "p95": 225.399,
+          "p99": 225.698,
+          "max": 225.773
         }
       },
       "observe /_indices": {
-        "count": 5,
+        "count": 2,
         "statuses": {
-          "200": 5
+          "200": 2
         },
         "errors": [],
-        "bytes_received": 5508,
+        "bytes_received": 2203,
         "latency_ms": {
-          "min": 158.149,
-          "avg": 206.591,
-          "p50": 208.686,
-          "p90": 233.877,
-          "p95": 234.516,
-          "p99": 235.028,
-          "max": 235.156
+          "min": 244.869,
+          "avg": 279.544,
+          "p50": 279.544,
+          "p90": 307.284,
+          "p95": 310.752,
+          "p99": 313.526,
+          "max": 314.219
         }
       },
       "observe /_nodes/stats": {
-        "count": 4,
+        "count": 1,
         "statuses": {
-          "200": 4
+          "200": 1
         },
         "errors": [],
-        "bytes_received": 2549,
+        "bytes_received": 638,
         "latency_ms": {
-          "min": 11.197,
-          "avg": 13.63,
-          "p50": 12.518,
-          "p90": 16.58,
-          "p95": 17.433,
-          "p99": 18.115,
-          "max": 18.286
+          "min": 26.76,
+          "avg": 26.76,
+          "p50": 26.76,
+          "p90": 26.76,
+          "p95": 26.76,
+          "p99": 26.76,
+          "max": 26.76
         }
       },
       "observe /_shards": {
-        "count": 5,
+        "count": 2,
         "statuses": {
-          "200": 5
+          "200": 2
         },
         "errors": [],
-        "bytes_received": 15314,
+        "bytes_received": 6137,
         "latency_ms": {
-          "min": 176.71,
-          "avg": 186.904,
-          "p50": 186.096,
-          "p90": 195.671,
-          "p95": 198.282,
-          "p99": 200.371,
-          "max": 200.893
+          "min": 193.75,
+          "avg": 250.264,
+          "p50": 250.264,
+          "p90": 295.475,
+          "p95": 301.127,
+          "p99": 305.648,
+          "max": 306.778
         }
       },
       "observe /_snapshot_status": {
-        "count": 4,
+        "count": 1,
         "statuses": {
-          "200": 4
+          "200": 1
         },
         "errors": [],
-        "bytes_received": 25757,
+        "bytes_received": 6951,
         "latency_ms": {
-          "min": 145.434,
-          "avg": 151.262,
-          "p50": 147.125,
-          "p90": 160.373,
-          "p95": 162.868,
-          "p99": 164.864,
-          "max": 165.363
+          "min": 225.9,
+          "avg": 225.9,
+          "p50": 225.9,
+          "p90": 225.9,
+          "p95": 225.9,
+          "p99": 225.9,
+          "max": 225.9
         }
       },
       "observe /stress_books/_uploads": {
-        "count": 4,
+        "count": 1,
         "statuses": {
-          "200": 4
+          "200": 1
         },
         "errors": [],
-        "bytes_received": 17890,
+        "bytes_received": 3218,
         "latency_ms": {
-          "min": 43.46,
-          "avg": 55.261,
-          "p50": 53.707,
-          "p90": 65.501,
-          "p95": 67.836,
-          "p99": 69.703,
-          "max": 70.17
+          "min": 97.879,
+          "avg": 97.879,
+          "p50": 97.879,
+          "p90": 97.879,
+          "p95": 97.879,
+          "p99": 97.879,
+          "max": 97.879
         }
       },
       "search_after": {
-        "count": 165,
+        "count": 8,
         "statuses": {
-          "200": 165
+          "200": 8
         },
         "errors": [],
-        "bytes_received": 644689,
+        "bytes_received": 31058,
         "latency_ms": {
-          "min": 42.627,
-          "avg": 176.058,
-          "p50": 81.862,
-          "p90": 289.998,
-          "p95": 937.543,
-          "p99": 1500.274,
-          "max": 2034.721
+          "min": 96.432,
+          "avg": 396.078,
+          "p50": 311.487,
+          "p90": 697.575,
+          "p95": 961.068,
+          "p99": 1171.863,
+          "max": 1224.562
         }
       },
       "strong_search": {
-        "count": 137,
+        "count": 9,
         "statuses": {
-          "200": 137
+          "200": 9
         },
         "errors": [],
-        "bytes_received": 515642,
+        "bytes_received": 33864,
         "latency_ms": {
-          "min": 85.498,
-          "avg": 341.567,
-          "p50": 119.948,
-          "p90": 1083.888,
-          "p95": 1436.412,
-          "p99": 1861.799,
-          "max": 2229.066
+          "min": 104.968,
+          "avg": 995.591,
+          "p50": 106.815,
+          "p90": 2475.804,
+          "p95": 3643.175,
+          "p99": 4577.072,
+          "max": 4810.547
         }
       },
       "warmup_bulk": {
-        "count": 10,
+        "count": 100,
         "statuses": {
-          "200": 10
+          "200": 100
         },
         "errors": [],
-        "bytes_received": 71267,
+        "bytes_received": 717689,
         "latency_ms": {
-          "min": 953.349,
-          "avg": 1294.587,
-          "p50": 1069.381,
-          "p90": 1671.161,
-          "p95": 2337.201,
-          "p99": 2870.033,
-          "max": 3003.241
+          "min": 879.117,
+          "avg": 2067.869,
+          "p50": 1799.832,
+          "p90": 3472.677,
+          "p95": 3935.095,
+          "p99": 4382.962,
+          "max": 4718.779
         }
       },
       "weak_search": {
-        "count": 160,
+        "count": 11,
         "statuses": {
-          "200": 160
+          "200": 11
         },
         "errors": [],
-        "bytes_received": 636333,
+        "bytes_received": 43351,
         "latency_ms": {
-          "min": 46.574,
-          "avg": 157.569,
-          "p50": 84.57,
-          "p90": 275.823,
-          "p95": 367.023,
-          "p99": 1174.201,
-          "max": 2057.405
+          "min": 88.521,
+          "avg": 172.153,
+          "p50": 111.869,
+          "p90": 319.589,
+          "p95": 459.881,
+          "p99": 572.114,
+          "max": 600.173
         }
       }
     },
     "counters": {
-      "bulk_docs": 1300,
-      "bulk_requests": 26,
+      "bulk_docs": 400,
+      "bulk_requests": 8,
       "setup_created_index": 1,
-      "warmup_docs": 500
+      "warmup_docs": 5000
     }
   }
 }
