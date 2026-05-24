@@ -1,0 +1,258 @@
+{
+  "base_url": "http://127.0.0.1:9200",
+  "index": "stress_books",
+  "duration_seconds": 30,
+  "started_at_epoch_seconds": 1779641007.831211,
+  "finished_at_epoch_seconds": 1779641051.88752,
+  "options": {
+    "shards": 3,
+    "bulk_size": 50,
+    "write_workers": 2,
+    "read_workers": 4,
+    "knn_workers": 1,
+    "observe_workers": 1,
+    "search_size": 10,
+    "warmup_docs": 500,
+    "reset_index": false,
+    "categories": [
+      "search",
+      "storage",
+      "lucene",
+      "s3",
+      "distributed",
+      "vector",
+      "observability"
+    ]
+  },
+  "metrics": {
+    "operations": {
+      "aggregation_search": {
+        "count": 131,
+        "statuses": {
+          "200": 131
+        },
+        "errors": [],
+        "bytes_received": 67732,
+        "latency_ms": {
+          "min": 52.357,
+          "avg": 177.035,
+          "p50": 85.045,
+          "p90": 366.039,
+          "p95": 913.757,
+          "p99": 1073.478,
+          "max": 1207.604
+        }
+      },
+      "bulk_write": {
+        "count": 26,
+        "statuses": {
+          "200": 26
+        },
+        "errors": [],
+        "bytes_received": 192628,
+        "latency_ms": {
+          "min": 1490.117,
+          "avg": 2352.544,
+          "p50": 2062.047,
+          "p90": 3660.343,
+          "p95": 3785.321,
+          "p99": 3837.264,
+          "max": 3852.834
+        }
+      },
+      "knn_search": {
+        "count": 214,
+        "statuses": {
+          "200": 214
+        },
+        "errors": [],
+        "bytes_received": 813618,
+        "latency_ms": {
+          "min": 42.231,
+          "avg": 145.1,
+          "p50": 78.189,
+          "p90": 262.146,
+          "p95": 394.799,
+          "p99": 1195.017,
+          "max": 2238.219
+        }
+      },
+      "observe /_cluster/health": {
+        "count": 5,
+        "statuses": {
+          "200": 5
+        },
+        "errors": [],
+        "bytes_received": 1105,
+        "latency_ms": {
+          "min": 148.317,
+          "avg": 179.364,
+          "p50": 171.467,
+          "p90": 207.796,
+          "p95": 207.891,
+          "p99": 207.968,
+          "max": 207.987
+        }
+      },
+      "observe /_indices": {
+        "count": 5,
+        "statuses": {
+          "200": 5
+        },
+        "errors": [],
+        "bytes_received": 5508,
+        "latency_ms": {
+          "min": 158.149,
+          "avg": 206.591,
+          "p50": 208.686,
+          "p90": 233.877,
+          "p95": 234.516,
+          "p99": 235.028,
+          "max": 235.156
+        }
+      },
+      "observe /_nodes/stats": {
+        "count": 4,
+        "statuses": {
+          "200": 4
+        },
+        "errors": [],
+        "bytes_received": 2549,
+        "latency_ms": {
+          "min": 11.197,
+          "avg": 13.63,
+          "p50": 12.518,
+          "p90": 16.58,
+          "p95": 17.433,
+          "p99": 18.115,
+          "max": 18.286
+        }
+      },
+      "observe /_shards": {
+        "count": 5,
+        "statuses": {
+          "200": 5
+        },
+        "errors": [],
+        "bytes_received": 15314,
+        "latency_ms": {
+          "min": 176.71,
+          "avg": 186.904,
+          "p50": 186.096,
+          "p90": 195.671,
+          "p95": 198.282,
+          "p99": 200.371,
+          "max": 200.893
+        }
+      },
+      "observe /_snapshot_status": {
+        "count": 4,
+        "statuses": {
+          "200": 4
+        },
+        "errors": [],
+        "bytes_received": 25757,
+        "latency_ms": {
+          "min": 145.434,
+          "avg": 151.262,
+          "p50": 147.125,
+          "p90": 160.373,
+          "p95": 162.868,
+          "p99": 164.864,
+          "max": 165.363
+        }
+      },
+      "observe /stress_books/_uploads": {
+        "count": 4,
+        "statuses": {
+          "200": 4
+        },
+        "errors": [],
+        "bytes_received": 17890,
+        "latency_ms": {
+          "min": 43.46,
+          "avg": 55.261,
+          "p50": 53.707,
+          "p90": 65.501,
+          "p95": 67.836,
+          "p99": 69.703,
+          "max": 70.17
+        }
+      },
+      "search_after": {
+        "count": 165,
+        "statuses": {
+          "200": 165
+        },
+        "errors": [],
+        "bytes_received": 644689,
+        "latency_ms": {
+          "min": 42.627,
+          "avg": 176.058,
+          "p50": 81.862,
+          "p90": 289.998,
+          "p95": 937.543,
+          "p99": 1500.274,
+          "max": 2034.721
+        }
+      },
+      "strong_search": {
+        "count": 137,
+        "statuses": {
+          "200": 137
+        },
+        "errors": [],
+        "bytes_received": 515642,
+        "latency_ms": {
+          "min": 85.498,
+          "avg": 341.567,
+          "p50": 119.948,
+          "p90": 1083.888,
+          "p95": 1436.412,
+          "p99": 1861.799,
+          "max": 2229.066
+        }
+      },
+      "warmup_bulk": {
+        "count": 10,
+        "statuses": {
+          "200": 10
+        },
+        "errors": [],
+        "bytes_received": 71267,
+        "latency_ms": {
+          "min": 953.349,
+          "avg": 1294.587,
+          "p50": 1069.381,
+          "p90": 1671.161,
+          "p95": 2337.201,
+          "p99": 2870.033,
+          "max": 3003.241
+        }
+      },
+      "weak_search": {
+        "count": 160,
+        "statuses": {
+          "200": 160
+        },
+        "errors": [],
+        "bytes_received": 636333,
+        "latency_ms": {
+          "min": 46.574,
+          "avg": 157.569,
+          "p50": 84.57,
+          "p90": 275.823,
+          "p95": 367.023,
+          "p99": 1174.201,
+          "max": 2057.405
+        }
+      }
+    },
+    "counters": {
+      "bulk_docs": 1300,
+      "bulk_requests": 26,
+      "setup_created_index": 1,
+      "warmup_docs": 500
+    }
+  }
+}

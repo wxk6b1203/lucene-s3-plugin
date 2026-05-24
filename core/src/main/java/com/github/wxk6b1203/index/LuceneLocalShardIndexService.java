@@ -272,7 +272,12 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         if (generation < 0) {
             return emptySearchResponse(started);
         }
-        CachedRemoteSearcher cached = acquireRemoteSearcher(shardId, generation);
+        CachedRemoteSearcher cached;
+        try {
+            cached = acquireRemoteSearcher(shardId, generation);
+        } catch (IndexNotFoundException e) {
+            return emptySearchResponse(started);
+        }
         try {
             return searchSearcher(cached.searcher(), request, started);
         } finally {

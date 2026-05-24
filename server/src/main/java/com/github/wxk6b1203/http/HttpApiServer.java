@@ -51,6 +51,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -88,6 +91,7 @@ public class HttpApiServer implements AutoCloseable {
     private final Duration forwardTimeout;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
     private final AtomicBoolean maintenanceRunning = new AtomicBoolean();
+    private final ExecutorService maintenanceExecutor;
     private Long maintenanceTimerId;
     private S3Client s3Client;
     private HttpServer httpServer;
@@ -118,6 +122,9 @@ public class HttpApiServer implements AutoCloseable {
         this.vertx = Vertx.vertx();
         this.port = options.httpPort();
         this.forwardTimeout = Duration.ofSeconds(options.httpForwardTimeoutSeconds());
+        this.maintenanceExecutor = Executors.newSingleThreadExecutor(
+                Thread.ofVirtual().name("cluster-maintenance-", 0).factory()
+        );
         Set<NodeRole> roles = ensureCoordinatingRole(options.roles());
         this.localNode = new ClusterNode(
                 options.nodeId(),
@@ -1110,6 +1117,7 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private Future<SearchResponse> executeSearchPlan(SearchPlan plan, SearchRequest request, CoordinatingPit pit) {
+        List<SnapshotPin> snapshotPins = pit == null ? pinRemoteSearchSnapshots(plan) : List.of();
         VectorQuery vector = request.vector();
         int shardSize = request.searchAfter().isEmpty()
                 ? Math.max(0, request.from()) + Math.max(0, request.size())
@@ -1138,11 +1146,42 @@ public class HttpApiServer implements AutoCloseable {
                 .map(target -> executeShardSearch(target, withPit(shardRequest, pit, target)))
                 .toList();
         if (futures.isEmpty()) {
+            releaseSnapshotPins(snapshotPins);
             return Future.succeededFuture(new SearchResponse(0, 0, 0, 0, List.of(), Map.of(), List.of()));
         }
         long started = System.nanoTime();
         return Future.all(futures)
-                .map(ignored -> mergeSearchResponses(futures.stream().map(Future::result).toList(), request, started));
+                .map(ignored -> mergeSearchResponses(futures.stream().map(Future::result).toList(), request, started))
+                .andThen(ignored -> releaseSnapshotPins(snapshotPins));
+    }
+
+    private List<SnapshotPin> pinRemoteSearchSnapshots(SearchPlan plan) {
+        List<SnapshotPin> pins = new ArrayList<>();
+        Instant expiresAt = Instant.now().plus(forwardTimeout.multipliedBy(2).plusSeconds(30));
+        for (SearchShardTarget target : plan.targets()) {
+            Long generation = target.remoteSnapshotGeneration();
+            if (!target.remoteSnapshot() || generation == null || generation < 0) {
+                continue;
+            }
+            String physicalIndexName = physicalIndexName(target.shardId());
+            if (manifestMetadataManager.snapshot(physicalIndexName, generation) == null) {
+                continue;
+            }
+            String pinId = "search-" + UUID.randomUUID();
+            manifestMetadataManager.pinSnapshot(physicalIndexName, generation, pinId, expiresAt.toEpochMilli());
+            pins.add(new SnapshotPin(physicalIndexName, pinId));
+        }
+        return pins;
+    }
+
+    private void releaseSnapshotPins(List<SnapshotPin> pins) {
+        for (SnapshotPin pin : pins) {
+            try {
+                manifestMetadataManager.releaseSnapshotPin(pin.indexName(), pin.pinId());
+            } catch (Exception e) {
+                log.debug("failed to release search snapshot pin {}/{}", pin.indexName(), pin.pinId(), e);
+            }
+        }
     }
 
     private SearchPlan searchPlan(SearchRequest request, ClusterState state) {
@@ -2248,9 +2287,20 @@ public class HttpApiServer implements AutoCloseable {
             return;
         }
         try {
+            maintenanceExecutor.execute(this::runMaintenanceTick);
+        } catch (RejectedExecutionException e) {
+            maintenanceRunning.set(false);
+            log.warn("cluster maintenance executor rejected tick", e);
+        }
+    }
+
+    private void runMaintenanceTick() {
+        try {
             cleanupExpiredPits();
             maintenanceService.tick();
             refreshRuntimeMetrics();
+        } catch (Exception e) {
+            log.warn("cluster maintenance tick failed", e);
         } finally {
             maintenanceRunning.set(false);
         }
@@ -2559,6 +2609,9 @@ public class HttpApiServer implements AutoCloseable {
     private record RemoteHttpResponse(int statusCode, String body) {
     }
 
+    private record SnapshotPin(String indexName, String pinId) {
+    }
+
     private interface MeasuredSupplier<T> {
         T get() throws Exception;
     }
@@ -2575,6 +2628,7 @@ public class HttpApiServer implements AutoCloseable {
                 log.warn("failed to close http server", e);
             }
         }
+        shutdownMaintenanceExecutor();
         try {
             localShardIndexService.close();
         } catch (IOException e) {
@@ -2593,5 +2647,20 @@ public class HttpApiServer implements AutoCloseable {
             s3Client.close();
         }
         serverMetrics.close();
+    }
+
+    private void shutdownMaintenanceExecutor() {
+        maintenanceExecutor.shutdown();
+        try {
+            if (!maintenanceExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                maintenanceExecutor.shutdownNow();
+                if (!maintenanceExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    log.warn("cluster maintenance executor did not stop before timeout");
+                }
+            }
+        } catch (InterruptedException e) {
+            maintenanceExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }

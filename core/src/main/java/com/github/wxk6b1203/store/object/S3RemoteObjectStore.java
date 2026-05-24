@@ -7,13 +7,16 @@ import software.amazon.awssdk.services.s3.model.*;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 public class S3RemoteObjectStore implements RemoteObjectStore {
+    private static final int DELETE_OBJECTS_BATCH_SIZE = 1_000;
     private static final AtomicLong PUTS = new AtomicLong();
     private static final AtomicLong GETS = new AtomicLong();
     private static final AtomicLong DELETES = new AtomicLong();
@@ -76,22 +79,25 @@ public class S3RemoteObjectStore implements RemoteObjectStore {
         }
         long started = System.nanoTime();
         try {
-            DeleteObjectsRequest request = DeleteObjectsRequest.builder()
-                    .bucket(bucket)
-                    .delete(delete -> delete.objects(keys.stream()
-                            .map(key -> ObjectIdentifier.builder().key(key).build())
-                            .toList()))
-                    .build();
-            DeleteObjectsResponse response = s3Client.deleteObjects(request);
-            if (response.hasErrors()) {
-                DELETE_ERRORS.incrementAndGet();
-                String errors = response.errors().stream()
-                        .limit(5)
-                        .map(error -> error.key() + "=" + error.code() + ":" + error.message())
-                        .collect(Collectors.joining(", "));
-                throw new IOException("Failed to delete S3 objects from bucket " + bucket + ": " + errors);
+            List<String> objectKeys = new ArrayList<>(keys);
+            int deleted = 0;
+            for (int offset = 0; offset < objectKeys.size(); offset += DELETE_OBJECTS_BATCH_SIZE) {
+                List<String> batch = objectKeys.subList(
+                        offset,
+                        Math.min(offset + DELETE_OBJECTS_BATCH_SIZE, objectKeys.size())
+                );
+                DeleteObjectsResponse response = deleteBatch(batch);
+                if (response.hasErrors()) {
+                    DELETE_ERRORS.incrementAndGet();
+                    String errors = response.errors().stream()
+                            .limit(5)
+                            .map(error -> error.key() + "=" + error.code() + ":" + error.message())
+                            .collect(Collectors.joining(", "));
+                    throw new IOException("Failed to delete S3 objects from bucket " + bucket + ": " + errors);
+                }
+                deleted += batch.size();
             }
-            DELETES.addAndGet(keys.size());
+            DELETES.addAndGet(deleted);
         } catch (IOException | RuntimeException e) {
             if (e instanceof IOException) {
                 throw e;
@@ -101,6 +107,16 @@ public class S3RemoteObjectStore implements RemoteObjectStore {
         } finally {
             DELETE_DURATION_NANOS.addAndGet(System.nanoTime() - started);
         }
+    }
+
+    private DeleteObjectsResponse deleteBatch(List<String> keys) {
+        DeleteObjectsRequest request = DeleteObjectsRequest.builder()
+                .bucket(bucket)
+                .delete(delete -> delete.objects(keys.stream()
+                        .map(key -> ObjectIdentifier.builder().key(key).build())
+                        .toList()))
+                .build();
+        return s3Client.deleteObjects(request);
     }
 
     public static Map<String, Object> statsSnapshot() {

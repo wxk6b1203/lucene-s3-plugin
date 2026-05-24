@@ -19,6 +19,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -116,34 +118,43 @@ public class ManifestManager implements AutoCloseable {
         List<PendingUpload> pendingUploads = new ArrayList<>();
         String snapshotIndexName = null;
         for (CommittingIndexFile indexFile : indexFiles) {
+            Path uploadSource = null;
             if (snapshotIndexName == null) {
                 snapshotIndexName = indexFile.indexName();
             } else if (!Objects.equals(snapshotIndexName, indexFile.indexName())) {
                 throw new IllegalArgumentException("snapshot commit must target a single physical index");
             }
-            long size = Files.size(indexFile.filePath());
-            long checksum = FileChecksums.crc32(indexFile.filePath());
-            long modifiedTime = Files.getLastModifiedTime(indexFile.filePath()).toMillis();
-            String fileName = indexFile.filePath().getFileName().toString();
-            String objectKey = remoteObjectKey(indexFile.indexName(), fileName, checksum, size);
-            IndexFile file = new IndexFile(
-                    indexFile.indexName(),
-                    fileName,
-                    Hierarchy.DATA.path,
-                    objectKey,
-                    size,
-                    checksum,
-                    modifiedTime
-            );
-            IndexFileMetadata metadata = uploadMetadata(file);
-            if (metadata != null) {
-                pendingUploads.add(new PendingUpload(indexFile.filePath(), metadata));
-            }
-            IndexFileMetadata current = metadata == null
-                    ? metadataManager.fileMetadata(file.indexName(), file.name())
-                    : metadata;
-            if (current != null) {
-                commitFiles.add(new CommitFile(current.getIndexName(), current.getName()));
+            try {
+                uploadSource = stageUploadSource(indexFile.filePath());
+                long size = Files.size(uploadSource);
+                long checksum = FileChecksums.crc32(uploadSource);
+                long modifiedTime = Files.getLastModifiedTime(uploadSource).toMillis();
+                String fileName = indexFile.filePath().getFileName().toString();
+                String objectKey = remoteObjectKey(indexFile.indexName(), fileName, checksum, size);
+                IndexFile file = new IndexFile(
+                        indexFile.indexName(),
+                        fileName,
+                        Hierarchy.DATA.path,
+                        objectKey,
+                        size,
+                        checksum,
+                        modifiedTime
+                );
+                IndexFileMetadata metadata = uploadMetadata(file);
+                if (metadata != null) {
+                    pendingUploads.add(new PendingUpload(uploadSource, metadata, uploadSource != indexFile.filePath()));
+                    uploadSource = null;
+                }
+                IndexFileMetadata current = metadata == null
+                        ? metadataManager.fileMetadata(file.indexName(), file.name())
+                        : metadata;
+                if (current != null) {
+                    commitFiles.add(new CommitFile(current.getIndexName(), current.getName()));
+                }
+            } finally {
+                if (uploadSource != null && uploadSource != indexFile.filePath()) {
+                    deleteStagedUpload(uploadSource);
+                }
             }
         }
         SnapshotCommit snapshotCommit = snapshotCommit(snapshotIndexName, snapshotFileNames, commitFiles);
@@ -289,22 +300,26 @@ public class ManifestManager implements AutoCloseable {
     }
 
     private boolean uploadCommit(List<PendingUpload> pendingUploads, SnapshotCommit snapshotCommit) {
-        boolean dataFilesUploaded = true;
-        for (PendingUpload pendingUpload : pendingUploads) {
-            if (!isCommittedSegmentFile(pendingUpload.metadata().getName())) {
-                dataFilesUploaded &= upload(pendingUpload.source(), pendingUpload.metadata());
+        try {
+            boolean dataFilesUploaded = true;
+            for (PendingUpload pendingUpload : pendingUploads) {
+                if (!isCommittedSegmentFile(pendingUpload.metadata().getName())) {
+                    dataFilesUploaded &= upload(pendingUpload.source(), pendingUpload.metadata());
+                }
             }
-        }
-        if (!dataFilesUploaded) {
-            return false;
-        }
-        boolean segmentFilesUploaded = true;
-        for (PendingUpload pendingUpload : pendingUploads) {
-            if (isCommittedSegmentFile(pendingUpload.metadata().getName())) {
-                segmentFilesUploaded &= upload(pendingUpload.source(), pendingUpload.metadata());
+            if (!dataFilesUploaded) {
+                return false;
             }
+            boolean segmentFilesUploaded = true;
+            for (PendingUpload pendingUpload : pendingUploads) {
+                if (isCommittedSegmentFile(pendingUpload.metadata().getName())) {
+                    segmentFilesUploaded &= upload(pendingUpload.source(), pendingUpload.metadata());
+                }
+            }
+            return segmentFilesUploaded && publishSnapshotIfClean(snapshotCommit);
+        } finally {
+            cleanupPendingUploadSources(pendingUploads);
         }
-        return segmentFilesUploaded && publishSnapshotIfClean(snapshotCommit);
     }
 
     private boolean upload(Path source, IndexFileMetadata metadata) {
@@ -487,6 +502,33 @@ public class ManifestManager implements AutoCloseable {
         );
     }
 
+    private Path stageUploadSource(Path source) throws IOException {
+        if (remoteObjectStore == null) {
+            return source;
+        }
+        FileTime modifiedTime = Files.getLastModifiedTime(source);
+        Path staged = Files.createTempFile("lucene-s3-upload-", "-" + source.getFileName());
+        Files.copy(source, staged, StandardCopyOption.REPLACE_EXISTING);
+        Files.setLastModifiedTime(staged, modifiedTime);
+        return staged;
+    }
+
+    private void cleanupPendingUploadSources(List<PendingUpload> pendingUploads) {
+        for (PendingUpload pendingUpload : pendingUploads) {
+            if (pendingUpload.deleteSourceAfterUpload()) {
+                deleteStagedUpload(pendingUpload.source());
+            }
+        }
+    }
+
+    private void deleteStagedUpload(Path staged) {
+        try {
+            Files.deleteIfExists(staged);
+        } catch (IOException e) {
+            log.warn("failed to delete staged upload file {}", staged, e);
+        }
+    }
+
     private void ensureRemoteObjectStore() throws IOException {
         if (remoteObjectStore == null) {
             throw new IOException("remote object store is not configured");
@@ -545,7 +587,7 @@ public class ManifestManager implements AutoCloseable {
         }
     }
 
-    private record PendingUpload(Path source, IndexFileMetadata metadata) {
+    private record PendingUpload(Path source, IndexFileMetadata metadata, boolean deleteSourceAfterUpload) {
     }
 
     private record CommitFile(String indexName, String name) {
