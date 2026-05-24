@@ -747,6 +747,39 @@ $env:LUCENE_S3_STRESS_SECONDS="8"
 
 测试会启动单节点服务，混合执行 `_bulk`、`_search`、`_knn_search` 和观测接口请求，并把 JSON 报告写到 `server/build/reports/stress/http-api-stress.json`。可选环境变量还包括 `LUCENE_S3_STRESS_SHARDS`、`LUCENE_S3_STRESS_CATEGORIES`、`LUCENE_S3_STRESS_CACHE_MAX_BYTES` 和 `LUCENE_S3_STRESS_METRICS_PORT`。
 
+也可以使用 `test/http_stress.py` 对已经启动的 HTTP 服务执行外部压测。下面是一组在 macOS M1 Pro 10C、32GB 内存机器上的本地样例结果，仅用于观察当前混合工作负载下的接口耗时形态；结果会受机器配置、S3/OSS endpoint、etcd、JVM 预热、索引状态和压测参数影响，不应视为通用性能基准。
+
+```text
+HTTP stress summary
+base_url: http://127.0.0.1:9200
+index:    stress_books
+duration: 10s
+
+operation                             count       avg       p95       p99           statuses
+----------------------------------------------------------------------------------------------
+aggregation_search                        2  3047.175  4638.683   4780.15              200:2
+bulk_write                                8  2982.203  4341.879  4535.671              200:8
+knn_search                               17   591.094  1989.967  4219.992             200:17
+observe /_cluster/health                  2   222.032   225.399   225.698              200:2
+observe /_indices                         2   279.544   310.752   313.526              200:2
+observe /_nodes/stats                     1     26.76     26.76     26.76              200:1
+observe /_shards                          2   250.264   301.127   305.648              200:2
+observe /_snapshot_status                 1     225.9     225.9     225.9              200:1
+observe /stress_books/_uploads            1    97.879    97.879    97.879              200:1
+search_after                              8   396.078   961.068  1171.863              200:8
+strong_search                             9   995.591  3643.175  4577.072              200:9
+warmup_bulk                             100  2067.869  3935.095  4382.962            200:100
+weak_search                              11   172.153   459.881   572.114             200:11
+
+counters:
+  bulk_docs: 400
+  bulk_requests: 8
+  setup_created_index: 1
+  warmup_docs: 5000
+
+report: test/http-stress-report.json
+```
+
 ## 当前限制和注意事项
 
 - 项目仍处于实验阶段，不建议直接用于生产。
