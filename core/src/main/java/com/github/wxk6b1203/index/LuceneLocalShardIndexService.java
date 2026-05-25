@@ -27,8 +27,12 @@ import org.apache.lucene.util.NumericUtils;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -48,6 +52,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private static final int UPDATE_BY_QUERY_BATCH_SIZE = 512;
     private static final Duration REMOTE_SEARCHER_CACHE_TTL = Duration.ofMinutes(5);
+    private static final long SLOW_COMMIT_WARN_NANOS = 1_000_000_000L;
 
     private final Path basePath;
     private final String bucket;
@@ -994,7 +999,9 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private void commitAndRefresh(ShardWriter shardWriter) throws IOException {
+        long commitStarted = System.nanoTime();
         shardWriter.writer.commit();
+        warnSlowCommit(shardWriter, commitStarted);
         IndexCommit commit = shardWriter.deletionPolicy.snapshot();
         RetainedSnapshotCommit retained = retainSnapshotCommit(shardWriter, commit);
         try {
@@ -1013,6 +1020,17 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             throw e;
         }
         shardWriter.searcherManager.maybeRefreshBlocking();
+    }
+
+    private void warnSlowCommit(ShardWriter shardWriter, long started) {
+        long elapsedNanos = System.nanoTime() - started;
+        if (elapsedNanos >= SLOW_COMMIT_WARN_NANOS) {
+            log.warn(
+                    "slow Lucene commit for shard {} took {}ms; this time is inside IndexWriter.commit() and usually means flush/fsync or merge pressure on local WAL",
+                    shardWriter.shardId.routeKey(),
+                    elapsedNanos / 1_000_000
+            );
+        }
     }
 
     private RetainedSnapshotCommit retainSnapshotCommit(ShardWriter shardWriter, IndexCommit commit) {
@@ -1123,18 +1141,37 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         if (!Files.exists(path)) {
             return;
         }
-        try (var stream = Files.walk(path)) {
-            IOException failure = null;
-            for (Path item : stream.sorted(Comparator.reverseOrder()).toList()) {
-                try {
-                    Files.deleteIfExists(item);
-                } catch (IOException e) {
-                    failure = addFailure(failure, e);
+        Files.walkFileTree(path, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                deleteIfExists(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException e) throws IOException {
+                if (e instanceof NoSuchFileException || !Files.exists(file)) {
+                    return FileVisitResult.CONTINUE;
                 }
+                throw e;
             }
-            if (failure != null) {
-                throw failure;
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException e) throws IOException {
+                if (e != null && !(e instanceof NoSuchFileException)) {
+                    throw e;
+                }
+                deleteIfExists(dir);
+                return FileVisitResult.CONTINUE;
             }
+        });
+    }
+
+    private void deleteIfExists(Path path) throws IOException {
+        try {
+            Files.deleteIfExists(path);
+        } catch (NoSuchFileException ignored) {
+            // Another maintenance task or cache cleanup can remove cache files while index deletion is walking them.
         }
     }
 

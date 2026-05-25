@@ -7,6 +7,7 @@ import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.store.common.FileChecksums;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.SegmentInfos;
@@ -39,7 +40,10 @@ import java.util.stream.Collectors;
 /**
  * A Directory implementation that uses S3 as the underlying storage.
  */
+@Slf4j
 public class S3CachingDirectory extends BaseDirectory {
+    private static final long SLOW_LOCAL_SYNC_WARN_NANOS = 1_000_000_000L;
+
     private final Path basePath;
     private final String indexName;
     private final ManifestManager manifestManager;
@@ -210,7 +214,9 @@ public class S3CachingDirectory extends BaseDirectory {
                 localNames.add(name);
             }
         }
+        long started = System.nanoTime();
         walDirectory.sync(localNames);
+        warnSlowSync("sync", started, localNames);
     }
 
     /**
@@ -220,7 +226,9 @@ public class S3CachingDirectory extends BaseDirectory {
     @Override
     public void syncMetaData() throws IOException {
         ensureOpen();
+        long started = System.nanoTime();
         walDirectory.syncMetaData();
+        warnSlowSync("syncMetaData", started, List.of());
         syncedFiles.clear();
     }
 
@@ -260,6 +268,21 @@ public class S3CachingDirectory extends BaseDirectory {
                 .stream()
                 .filter(this::shouldPublish)
                 .collect(Collectors.toCollection(HashSet::new));
+    }
+
+    private void warnSlowSync(String operation, long started, Collection<String> names) {
+        long elapsedNanos = System.nanoTime() - started;
+        if (elapsedNanos < SLOW_LOCAL_SYNC_WARN_NANOS) {
+            return;
+        }
+        log.warn(
+                "slow WAL {} for {} took {}ms, files={}, sample={}",
+                operation,
+                indexName,
+                elapsedNanos / 1_000_000,
+                names.size(),
+                names.stream().limit(20).toList()
+        );
     }
 
     @Override
