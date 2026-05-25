@@ -14,8 +14,11 @@ import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
+import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.KeepOnlyLastCommitDeletionPolicy;
+import org.apache.lucene.index.SnapshotDeletionPolicy;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -307,11 +310,24 @@ public class S3CachingDirectoryTest {
     }
 
     private void commitDocument(S3CachingDirectory directory, String id) throws IOException {
-        try (IndexWriter writer = new IndexWriter(directory, new IndexWriterConfig(new StandardAnalyzer()))) {
+        SnapshotDeletionPolicy deletionPolicy = new SnapshotDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
+        IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+        config.setIndexDeletionPolicy(deletionPolicy);
+        try (IndexWriter writer = new IndexWriter(directory, config)) {
             Document document = new Document();
             document.add(new StringField("_id", id, Field.Store.YES));
             writer.addDocument(document);
             writer.commit();
+            IndexCommit commit = deletionPolicy.snapshot();
+            boolean published = false;
+            try {
+                published = directory.publishIndexCommit(commit).join();
+            } finally {
+                if (published) {
+                    deletionPolicy.release(commit);
+                }
+                writer.deleteUnusedFiles();
+            }
         }
     }
 

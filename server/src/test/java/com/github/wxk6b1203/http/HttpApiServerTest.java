@@ -68,6 +68,7 @@ class HttpApiServerTest {
                 )
         ), 200);
         assertEquals(List.of("doc-2"), hitIds(knn));
+        assertTrue(((Number) knn.get("tookMillis")).longValue() > 0);
 
         Map<String, Object> firstPage = post("/books/_search", Map.of(
                 "query", Map.of("match_all", Map.of()),

@@ -14,6 +14,7 @@ import com.github.wxk6b1203.store.manifest.ManifestManager;
 import com.github.wxk6b1203.store.manifest.ManifestOptions;
 import com.github.wxk6b1203.store.object.RemoteObjectStore;
 import com.github.wxk6b1203.util.JsonUtil;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
@@ -43,6 +44,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+@Slf4j
 public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private static final int UPDATE_BY_QUERY_BATCH_SIZE = 512;
     private static final Duration REMOTE_SEARCHER_CACHE_TTL = Duration.ofMinutes(5);
@@ -354,7 +356,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
 
     private SearchResponse emptySearchResponse(long started) {
         return new SearchResponse(
-                (System.nanoTime() - started) / 1_000_000,
+                elapsedMillis(started),
                 1,
                 1,
                 0,
@@ -407,7 +409,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         List<SearchHit> page = hits.subList(hitFrom, hitTo);
         Map<String, Object> aggregations = aggregate(searcher, query, request.aggregations(), request.mappings());
         return new SearchResponse(
-                (System.nanoTime() - started) / 1_000_000,
+                elapsedMillis(started),
                 1,
                 1,
                 0,
@@ -415,6 +417,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 aggregations,
                 List.of()
         );
+    }
+
+    private long elapsedMillis(long started) {
+        long elapsedNanos = Math.max(0, System.nanoTime() - started);
+        return elapsedNanos == 0 ? 0 : Math.max(1, (elapsedNanos + 999_999) / 1_000_000);
     }
 
     @Override
@@ -838,7 +845,9 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 ShardWriter writer = writers.remove(shardId);
                 if (writer != null) {
                     try {
-                        writer.close();
+                        synchronized (writer) {
+                            writer.close();
+                        }
                     } catch (IOException e) {
                         failure = addFailure(failure, e);
                     }
@@ -869,7 +878,17 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 ShardWriter shardWriter = writers.get(shardId);
                 if (shardWriter != null) {
                     synchronized (shardWriter) {
-                        shardWriter.directory.publishLocalCommit();
+                        shardWriter.directory.publishLocalCommit()
+                                .whenComplete((published, throwable) -> {
+                                    if (throwable != null) {
+                                        log.warn("failed to retry pending uploads for {}", shardId.routeKey(), throwable);
+                                        return;
+                                    }
+                                    if (Boolean.TRUE.equals(published)) {
+                                        markLatestSnapshotPublished(shardWriter);
+                                        releaseReclaimableSnapshotCommits(shardWriter);
+                                    }
+                                });
                     }
                 } else {
                     Path walPath = PathUtil.walDataPath(basePath, physicalIndexName(shardId));
@@ -908,9 +927,21 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             Analyzer analyzer = new MappingAnalyzer(shardId, mappingsByShard, analyzerRegistry);
             IndexWriterConfig config = new IndexWriterConfig(analyzer);
             config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
+            SnapshotDeletionPolicy deletionPolicy = new SnapshotDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
+            config.setIndexDeletionPolicy(deletionPolicy);
             IndexWriter writer = new IndexWriter(directory, config);
             try {
-                return new ShardWriter(shardId, directory, writer, new SearcherManager(writer, null), analyzer);
+                return new ShardWriter(
+                        shardId,
+                        directory,
+                        writer,
+                        new SearcherManager(writer, null),
+                        analyzer,
+                        deletionPolicy,
+                        new ArrayList<>(),
+                        new AtomicInteger(),
+                        new AtomicInteger()
+                );
             } catch (IOException | RuntimeException e) {
                 try {
                     writer.close();
@@ -964,7 +995,98 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
 
     private void commitAndRefresh(ShardWriter shardWriter) throws IOException {
         shardWriter.writer.commit();
+        IndexCommit commit = shardWriter.deletionPolicy.snapshot();
+        RetainedSnapshotCommit retained = retainSnapshotCommit(shardWriter, commit);
+        try {
+            shardWriter.directory.publishIndexCommit(commit)
+                    .whenComplete((published, throwable) -> {
+                        if (throwable != null) {
+                            log.warn("failed to publish snapshot for {}", shardWriter.shardId.routeKey(), throwable);
+                        }
+                        if (Boolean.TRUE.equals(published)) {
+                            markCleanSnapshotPublished(shardWriter, retained.sequence);
+                        }
+                        completeSnapshotPublish(shardWriter, retained);
+                    });
+        } catch (IOException | RuntimeException e) {
+            releaseSnapshotCommit(shardWriter, retained);
+            throw e;
+        }
         shardWriter.searcherManager.maybeRefreshBlocking();
+    }
+
+    private RetainedSnapshotCommit retainSnapshotCommit(ShardWriter shardWriter, IndexCommit commit) {
+        synchronized (shardWriter) {
+            RetainedSnapshotCommit retained = new RetainedSnapshotCommit(
+                    commit,
+                    shardWriter.nextSnapshotSequence.incrementAndGet()
+            );
+            shardWriter.retainedSnapshotCommits.add(retained);
+            releaseReclaimableSnapshotCommits(shardWriter);
+            return retained;
+        }
+    }
+
+    private void completeSnapshotPublish(ShardWriter shardWriter, RetainedSnapshotCommit retained) {
+        synchronized (shardWriter) {
+            retained.completed = true;
+            releaseReclaimableSnapshotCommits(shardWriter);
+        }
+    }
+
+    private void markCleanSnapshotPublished(ShardWriter shardWriter, int sequence) {
+        synchronized (shardWriter) {
+            shardWriter.cleanPublishedSnapshotSequence.accumulateAndGet(sequence, Math::max);
+        }
+    }
+
+    private void markLatestSnapshotPublished(ShardWriter shardWriter) {
+        markCleanSnapshotPublished(shardWriter, shardWriter.nextSnapshotSequence.get());
+    }
+
+    private void releaseSnapshotCommit(ShardWriter shardWriter, RetainedSnapshotCommit retained) {
+        synchronized (shardWriter) {
+            if (!shardWriter.retainedSnapshotCommits.remove(retained)) {
+                return;
+            }
+            try {
+                shardWriter.deletionPolicy.release(retained.commit);
+                shardWriter.writer.deleteUnusedFiles();
+            } catch (Exception e) {
+                log.warn("failed to release snapshot for {}", shardWriter.shardId.routeKey(), e);
+            }
+        }
+    }
+
+    private void releaseReclaimableSnapshotCommits(ShardWriter shardWriter) {
+        synchronized (shardWriter) {
+            int latestSequence = shardWriter.nextSnapshotSequence.get();
+            int cleanPublishedSequence = shardWriter.cleanPublishedSnapshotSequence.get();
+            boolean released = false;
+            for (Iterator<RetainedSnapshotCommit> iterator = shardWriter.retainedSnapshotCommits.iterator(); iterator.hasNext(); ) {
+                RetainedSnapshotCommit retained = iterator.next();
+                if (!retained.completed) {
+                    continue;
+                }
+                if (retained.sequence >= latestSequence && retained.sequence > cleanPublishedSequence) {
+                    continue;
+                }
+                try {
+                    shardWriter.deletionPolicy.release(retained.commit);
+                    iterator.remove();
+                    released = true;
+                } catch (Exception e) {
+                    log.warn("failed to release snapshot for {}", shardWriter.shardId.routeKey(), e);
+                }
+            }
+            if (released) {
+                try {
+                    shardWriter.writer.deleteUnusedFiles();
+                } catch (Exception e) {
+                    log.warn("failed to delete unused files for {}", shardWriter.shardId.routeKey(), e);
+                }
+            }
+        }
     }
 
     private void rememberMappings(ShardId shardId, Map<String, FieldMapping> mappings) {
@@ -2313,7 +2435,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             S3CachingDirectory directory,
             IndexWriter writer,
             SearcherManager searcherManager,
-            Analyzer analyzer
+            Analyzer analyzer,
+            SnapshotDeletionPolicy deletionPolicy,
+            List<RetainedSnapshotCommit> retainedSnapshotCommits,
+            AtomicInteger nextSnapshotSequence,
+            AtomicInteger cleanPublishedSnapshotSequence
     ) implements AutoCloseable {
         @Override
         public void close() throws IOException {
@@ -2338,6 +2464,17 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 failure.addSuppressed(ioException);
             }
             return failure;
+        }
+    }
+
+    private static final class RetainedSnapshotCommit {
+        private final IndexCommit commit;
+        private final int sequence;
+        private boolean completed;
+
+        private RetainedSnapshotCommit(IndexCommit commit, int sequence) {
+            this.commit = commit;
+            this.sequence = sequence;
         }
     }
 

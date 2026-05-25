@@ -725,10 +725,10 @@ curl -X POST http://127.0.0.1:9200/books/_search_plan \
 常见状态码：
 
 - `400`: 请求参数、mapping、query、sort、bulk 格式等客户端输入错误。
-- `404`: index、mapping、PIT、远端文件等资源不存在或 PIT 已过期。
+- `404`: index、mapping、PIT 等资源不存在或 PIT 已过期。
 - `409`: index/document/mapping 已存在、写入 fence 过期、shard 当前不可写等状态冲突。
 - `502`: 远端 shard RPC 或 S3-compatible 服务返回错误。
-- `503`: 当前节点不是 master、master 不可用、无可用 DATA 节点、etcd/S3 客户端不可用等临时后端不可用。
+- `503`: 当前节点不是 master、master 不可用、无可用 DATA 节点、远端 commit snapshot 暂不可读、etcd/S3 客户端不可用等临时后端不可用。
 - `500`: 本地 IO 或未分类内部错误。
 
 ## 压力测试
@@ -757,28 +757,41 @@ duration: 10s
 
 operation                             count       avg       p95       p99           statuses
 ----------------------------------------------------------------------------------------------
-aggregation_search                        2  3047.175  4638.683   4780.15              200:2
-bulk_write                                8  2982.203  4341.879  4535.671              200:8
-knn_search                               17   591.094  1989.967  4219.992             200:17
-observe /_cluster/health                  2   222.032   225.399   225.698              200:2
-observe /_indices                         2   279.544   310.752   313.526              200:2
-observe /_nodes/stats                     1     26.76     26.76     26.76              200:1
-observe /_shards                          2   250.264   301.127   305.648              200:2
-observe /_snapshot_status                 1     225.9     225.9     225.9              200:1
-observe /stress_books/_uploads            1    97.879    97.879    97.879              200:1
-search_after                              8   396.078   961.068  1171.863              200:8
-strong_search                             9   995.591  3643.175  4577.072              200:9
-warmup_bulk                             100  2067.869  3935.095  4382.962            200:100
-weak_search                              11   172.153   459.881   572.114             200:11
+aggregation_search                      139   155.533   897.734  1302.732            200:139
+bulk_write                               28  2228.714  3316.161  3510.371             200:28
+knn_search                              214   143.672   470.812  1287.135            200:214
+observe /_cluster/health                  5   174.234   229.768   236.807              200:5
+observe /_indices                         5   198.253   245.038   254.167              200:5
+observe /_nodes/stats                     4    16.491    19.513    19.704              200:4
+observe /_shards                          5   193.883   235.352   243.935              200:5
+observe /_snapshot_status                 4   141.971    149.25   149.855              200:4
+observe /stress_books/_uploads            4    54.166    57.665    58.073              200:4
+search_after                            168   176.198  1097.121  1315.022            200:168
+strong_search                           145   309.758  1235.849  1865.464            200:145
+warmup_bulk                              10  1314.917   2443.69  2995.818             200:10
+weak_search                             168   159.618  1090.823  1295.656            200:168
 
 counters:
-  bulk_docs: 400
-  bulk_requests: 8
+  bulk_docs: 1400
+  bulk_requests: 28
   setup_created_index: 1
-  warmup_docs: 5000
+  warmup_docs: 500
 
 report: test/http-stress-report.json
 ```
+
+## 故障和恢复边界
+
+当前实现的核心假设是：S3/OSS 保存已经发布的 Lucene commit 文件，etcd 保存集群状态和 manifest 元数据，每个 shard 同一时间只有一个写 owner。写入提交后会用 Lucene `SnapshotDeletionPolicy` pin 住本地 commit 文件，异步上传完成并发布 manifest snapshot 后才释放；因此正常删除策略不会再清掉正在上传的 `segments_N` 和相关数据文件。
+
+| 场景 | 当前行为 | 读写影响 | 验证入口 |
+| --- | --- | --- | --- |
+| shard owner 短暂不可达 | master 重新分配 owner，写请求通过 owner term/allocation epoch 做 fence | 重分配期间写入可能返回 `409`/`503`，恢复后可继续写 | etcd 集成测试覆盖 stale owner reroute |
+| master 节点退出 | 具备 `MASTER` role 的存活节点重新竞选 master | 竞选期间管理类写入可能返回 `503`，已有 owner 的本地读写尽量不受影响 | etcd 集成测试覆盖 master failover 后协调节点写入 |
+| S3/OSS 暂时失败 | manifest 文件保持 `DIRTY`/`UPLOADING`，后台维护任务重试当前 owner 的 pending uploads | `weak` 可读 owner 本地 commit；需要远端 snapshot 的 `strong`/remote 读可能返回 `503` 或跳过不可用 generation | `/_snapshot_status`、`/:index/_uploads` |
+| 删除索引时远端删除失败 | 先写入 delete tombstone，再由维护任务重试删除本地/远端数据和 metadata | 索引处于 deleting 状态时拒绝新读写，避免删除一半又被继续使用 | `/_indices` 的 `delete_pending` |
+| PIT 或 search pin 保护旧 snapshot | snapshot GC 会保留最新 N 个和仍被 pin 的 generation | PIT 期间旧 generation 不会被 GC；过期后维护任务清理 | PIT API、snapshot GC 测试 |
+| 本地缓存损坏或丢失 | 重新从 manifest snapshot 对应对象下载 | 首次读取变慢；远端对象缺失时返回 `503` | remote cache 统计和错误响应 |
 
 ## 当前限制和注意事项
 

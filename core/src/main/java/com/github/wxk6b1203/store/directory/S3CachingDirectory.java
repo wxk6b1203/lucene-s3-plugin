@@ -7,6 +7,7 @@ import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.store.common.FileChecksums;
 import com.github.wxk6b1203.store.common.PathUtil;
 import com.github.wxk6b1203.store.manifest.ManifestManager;
+import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.store.BaseDirectory;
@@ -29,6 +30,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicLong;
@@ -219,35 +221,34 @@ public class S3CachingDirectory extends BaseDirectory {
     public void syncMetaData() throws IOException {
         ensureOpen();
         walDirectory.syncMetaData();
-        if (syncedFiles.stream().noneMatch(this::isCommittedSegmentFile)) {
-            return;
-        }
-        Set<String> publishCandidates = new HashSet<>(syncedFiles);
-        publishCandidates.addAll(List.of(listAll()));
-        publishLocalFiles(publishCandidates);
         syncedFiles.clear();
     }
 
-    public void publishLocalCommit() throws IOException {
+    public CompletableFuture<Boolean> publishLocalCommit() throws IOException {
         ensureOpen();
         List<String> visibleFiles = List.of(listAll());
         if (visibleFiles.stream().noneMatch(this::isCommittedSegmentFile)) {
-            return;
+            return CompletableFuture.completedFuture(true);
         }
-        publishLocalFiles(visibleFiles);
+        return publishLocalFiles(currentCommitFileNames(visibleFiles));
     }
 
-    private void publishLocalFiles(Collection<String> publishCandidates) throws IOException {
+    public CompletableFuture<Boolean> publishIndexCommit(IndexCommit commit) throws IOException {
+        ensureOpen();
+        return publishLocalFiles(commit.getFileNames());
+    }
+
+    private CompletableFuture<Boolean> publishLocalFiles(Collection<String> snapshotFileNames) throws IOException {
         List<CommittingIndexFile> files = new ArrayList<>();
-        Set<String> snapshotFileNames = currentCommitFileNames(publishCandidates);
         for (String name : snapshotFileNames) {
             if (shouldPublish(name) && shouldCommitToManifest(name) && Files.exists(walDataPath.resolve(name))) {
                 files.add(new CommittingIndexFile(indexName, walDataPath.resolve(name)));
             }
         }
         if (!files.isEmpty()) {
-            manifestManager.commit(files, snapshotFileNames);
+            return manifestManager.commit(files, snapshotFileNames);
         }
+        return CompletableFuture.completedFuture(true);
     }
 
     private Set<String> currentCommitFileNames(Collection<String> publishCandidates) throws IOException {

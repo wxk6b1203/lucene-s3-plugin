@@ -167,6 +167,46 @@ public class EtcdHttpApiServerTest {
         }
     }
 
+    @Test
+    @Timeout(120)
+    @EnabledIfEnvironmentVariable(named = "ETCD_TEST_ENDPOINTS", matches = ".+")
+    public void masterFailoverKeepsCoordinatingWritesAvailable() throws Exception {
+        String namespace = "test-http/" + UUID.randomUUID();
+        Client client = Client.builder().endpoints(System.getenv("ETCD_TEST_ENDPOINTS")).build();
+        try {
+            ServerHandle node1 = startServer(namespace, "node-1", Set.of(NodeRole.MASTER, NodeRole.DATA, NodeRole.COORDINATING));
+            ServerHandle node2 = startServer(namespace, "node-2", Set.of(NodeRole.MASTER, NodeRole.DATA, NodeRole.COORDINATING));
+            ServerHandle node3 = startServer(namespace, "node-3", Set.of(NodeRole.COORDINATING));
+
+            waitUntil(() -> get(node3, "/_nodes", 200).keySet().containsAll(Set.of("node-1", "node-2", "node-3")));
+            waitUntil(() -> get(node3, "/_cluster/state", 200).get("masterNodeId") != null);
+            String currentMaster = String.valueOf(get(node3, "/_cluster/state", 200).get("masterNodeId"));
+            ServerHandle master = "node-1".equals(currentMaster) ? node1 : node2;
+            ServerHandle survivor = "node-1".equals(currentMaster) ? node2 : node1;
+            put(master, "/books", Map.of(
+                    "number_of_shards", 1,
+                    "mappings", Map.of("properties", Map.of(
+                            "category", Map.of("type", "keyword")
+                    ))
+            ), 200);
+            waitUntil(() -> hasShardOwner(node3, "books", 0));
+
+            closeServer(master);
+            waitUntil(() -> survivor.nodeId().equals(get(survivor, "/_cluster/state", 200).get("masterNodeId")));
+            waitUntil(() -> survivor.nodeId().equals(shardOwner(node3, "books", 0)));
+
+            post(node3, "/books/_doc/failover-doc", Map.of("category", "failover"), 201);
+            waitUntil(() -> hitIds(post(node3, "/books/_search", Map.of(
+                    "query", Map.of("term", Map.of("category", "failover")),
+                    "size", 10
+            ), 200)).equals(List.of("failover-doc")));
+        } finally {
+            closeServers();
+            deletePrefix(client, namespace);
+            client.close();
+        }
+    }
+
     private ServerHandle startServer(String namespace, String nodeId, Set<NodeRole> roles) throws Exception {
         int port = freePort();
         HttpApiServer server = new HttpApiServer(new ServerOptions(

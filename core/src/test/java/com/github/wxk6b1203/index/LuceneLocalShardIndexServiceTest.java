@@ -80,6 +80,7 @@ public class LuceneLocalShardIndexServiceTest {
             );
 
             assertEquals(1, response.hits().size());
+            assertTrue(response.tookMillis() > 0);
             assertEquals("doc-1", response.hits().getFirst().id());
             assertEquals("Lucene", response.hits().getFirst().source().get("title"));
         }
@@ -182,6 +183,32 @@ public class LuceneLocalShardIndexServiceTest {
             assertTrue(weakIds.contains("doc-1"));
             assertTrue(weakIds.contains("doc-2"));
             assertEquals(List.of("doc-1"), remoteIds);
+        }
+    }
+
+    @Test
+    public void testFailedSnapshotPinIsReleasedAfterLaterCleanPublish() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        ControlledRemoteObjectStore remote = new ControlledRemoteObjectStore(
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        );
+        Path walPath = PathUtil.walDataPath(tempDir, "books__shard_0");
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                remote
+        )) {
+            remote.failPuts(true);
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of("title", "failed-upload")));
+            waitForUncleanSegment(metadata, "books__shard_0");
+
+            remote.failPuts(false);
+            service.index(new IndexDocumentRequest("books", shardId, "doc-2", Map.of("title", "clean-upload")));
+            waitForCleanSegment(metadata, "books__shard_0");
+
+            waitForCommittedSegmentFileCount(walPath, 1);
         }
     }
 
@@ -1318,6 +1345,29 @@ public class LuceneLocalShardIndexServiceTest {
         }
         try (var files = Files.list(remoteDataPath)) {
             return files.anyMatch(path -> path.getFileName().toString().startsWith("segments_"));
+        }
+    }
+
+    private void waitForCommittedSegmentFileCount(Path walPath, int expectedCount) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (committedSegmentFileCount(walPath) == expectedCount) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        assertEquals(expectedCount, committedSegmentFileCount(walPath));
+    }
+
+    private long committedSegmentFileCount(Path walPath) throws IOException {
+        if (!Files.isDirectory(walPath)) {
+            return 0;
+        }
+        try (var files = Files.list(walPath)) {
+            return files
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.startsWith("segments_") && !name.startsWith("pending_segments_"))
+                    .count();
         }
     }
 

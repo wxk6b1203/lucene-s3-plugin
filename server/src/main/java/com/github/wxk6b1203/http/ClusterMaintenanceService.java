@@ -59,6 +59,13 @@ final class ClusterMaintenanceService {
     private volatile Instant lastCacheCleanup = Instant.EPOCH;
     private volatile LocalCacheManager.CleanupStats lastCacheCleanupStats = new LocalCacheManager.CleanupStats(0, 0, 0, 0);
 
+    enum MaintenanceTask {
+        UPLOAD_RETRY,
+        SNAPSHOT_GC,
+        LIFECYCLE,
+        LOCAL_CACHE_CLEANUP
+    }
+
     ClusterMaintenanceService(
             ClusterStateRepository clusterStateRepository,
             ClusterCoordinator clusterCoordinator,
@@ -92,10 +99,18 @@ final class ClusterMaintenanceService {
     }
 
     void tick() {
-        retryOwnedShardUploads();
-        runSnapshotGarbageCollection();
-        runLifecyclePolicies();
-        runLocalCacheCleanup();
+        for (MaintenanceTask task : MaintenanceTask.values()) {
+            run(task);
+        }
+    }
+
+    void run(MaintenanceTask task) {
+        switch (task) {
+            case UPLOAD_RETRY -> retryOwnedShardUploads();
+            case SNAPSHOT_GC -> runSnapshotGarbageCollection();
+            case LIFECYCLE -> runLifecyclePolicies();
+            case LOCAL_CACHE_CLEANUP -> runLocalCacheCleanup();
+        }
     }
 
     Map<String, Object> uploadStatus(String indexFilter) throws IOException {

@@ -55,7 +55,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static com.github.wxk6b1203.http.HttpApiRequestParsing.*;
@@ -90,7 +89,7 @@ public class HttpApiServer implements AutoCloseable {
     private final ServerMetrics serverMetrics;
     private final Duration forwardTimeout;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
-    private final AtomicBoolean maintenanceRunning = new AtomicBoolean();
+    private final Set<String> maintenanceTasksRunning = ConcurrentHashMap.newKeySet();
     private final ExecutorService maintenanceExecutor;
     private Long maintenanceTimerId;
     private S3Client s3Client;
@@ -122,7 +121,7 @@ public class HttpApiServer implements AutoCloseable {
         this.vertx = Vertx.vertx();
         this.port = options.httpPort();
         this.forwardTimeout = Duration.ofSeconds(options.httpForwardTimeoutSeconds());
-        this.maintenanceExecutor = Executors.newSingleThreadExecutor(
+        this.maintenanceExecutor = Executors.newThreadPerTaskExecutor(
                 Thread.ofVirtual().name("cluster-maintenance-", 0).factory()
         );
         Set<NodeRole> roles = ensureCoordinatingRole(options.roles());
@@ -297,6 +296,11 @@ public class HttpApiServer implements AutoCloseable {
         } finally {
             recordStage(context, stage);
         }
+    }
+
+    private long requestStartedNanos(RoutingContext context) {
+        Long started = context.get(REQUEST_START_NANOS);
+        return started == null ? System.nanoTime() : started;
     }
 
     private void jsonMeasured(RoutingContext context, int status, Object body) {
@@ -895,7 +899,7 @@ public class HttpApiServer implements AutoCloseable {
             SearchPlan plan = measured(context, "plan", () -> pit == null
                     ? searchPlan(mappedRequest, state)
                     : new SearchPlan(mappedRequest.indexName(), mappedRequest.routing(), state.version(), pit.targets()));
-            executeSearchPlan(plan, request, pit)
+            executeSearchPlan(plan, request, pit, requestStartedNanos(context))
                     .onSuccess(response -> {
                         recordStage(context, "shard_execute");
                         jsonMeasured(context, 200, response);
@@ -1113,10 +1117,23 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private Future<SearchResponse> executeSearchPlan(SearchPlan plan, SearchRequest request) {
-        return executeSearchPlan(plan, request, null);
+        return executeSearchPlan(plan, request, System.nanoTime());
+    }
+
+    private Future<SearchResponse> executeSearchPlan(SearchPlan plan, SearchRequest request, long started) {
+        return executeSearchPlan(plan, request, null, started);
     }
 
     private Future<SearchResponse> executeSearchPlan(SearchPlan plan, SearchRequest request, CoordinatingPit pit) {
+        return executeSearchPlan(plan, request, pit, System.nanoTime());
+    }
+
+    private Future<SearchResponse> executeSearchPlan(
+            SearchPlan plan,
+            SearchRequest request,
+            CoordinatingPit pit,
+            long started
+    ) {
         List<SnapshotPin> snapshotPins = pit == null ? pinRemoteSearchSnapshots(plan) : List.of();
         VectorQuery vector = request.vector();
         int shardSize = request.searchAfter().isEmpty()
@@ -1147,12 +1164,16 @@ public class HttpApiServer implements AutoCloseable {
                 .toList();
         if (futures.isEmpty()) {
             releaseSnapshotPins(snapshotPins);
-            return Future.succeededFuture(new SearchResponse(0, 0, 0, 0, List.of(), Map.of(), List.of()));
+            return Future.succeededFuture(new SearchResponse(elapsedMillis(started), 0, 0, 0, List.of(), Map.of(), List.of()));
         }
-        long started = System.nanoTime();
         return Future.all(futures)
                 .map(ignored -> mergeSearchResponses(futures.stream().map(Future::result).toList(), request, started))
                 .andThen(ignored -> releaseSnapshotPins(snapshotPins));
+    }
+
+    private long elapsedMillis(long started) {
+        long elapsedNanos = Math.max(0, System.nanoTime() - started);
+        return elapsedNanos == 0 ? 0 : Math.max(1, (elapsedNanos + 999_999) / 1_000_000);
     }
 
     private List<SnapshotPin> pinRemoteSearchSnapshots(SearchPlan plan) {
@@ -1952,7 +1973,7 @@ public class HttpApiServer implements AutoCloseable {
             validateVectorQuery(request.vector(), mappings);
             request = withMappings(request, mappings);
             SearchPlan plan = searchPlan(request, state);
-            executeSearchPlan(plan, request)
+            executeSearchPlan(plan, request, requestStartedNanos(context))
                     .onSuccess(response -> json(context, 200, response))
                     .onFailure(e -> {
                         Exception exception = exception(e);
@@ -2283,26 +2304,32 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void maintenanceTick() {
-        if (!maintenanceRunning.compareAndSet(false, true)) {
+        submitMaintenanceTask("pit-cleanup", this::cleanupExpiredPits);
+        for (ClusterMaintenanceService.MaintenanceTask task : ClusterMaintenanceService.MaintenanceTask.values()) {
+            submitMaintenanceTask(task.name(), () -> maintenanceService.run(task));
+        }
+        submitMaintenanceTask("metrics-refresh", this::refreshRuntimeMetrics);
+    }
+
+    private void submitMaintenanceTask(String name, Runnable task) {
+        if (!maintenanceTasksRunning.add(name)) {
             return;
         }
         try {
-            maintenanceExecutor.execute(this::runMaintenanceTick);
+            maintenanceExecutor.execute(() -> runMaintenanceTask(name, task));
         } catch (RejectedExecutionException e) {
-            maintenanceRunning.set(false);
-            log.warn("cluster maintenance executor rejected tick", e);
+            maintenanceTasksRunning.remove(name);
+            log.warn("cluster maintenance executor rejected task {}", name, e);
         }
     }
 
-    private void runMaintenanceTick() {
+    private void runMaintenanceTask(String name, Runnable task) {
         try {
-            cleanupExpiredPits();
-            maintenanceService.tick();
-            refreshRuntimeMetrics();
+            task.run();
         } catch (Exception e) {
-            log.warn("cluster maintenance tick failed", e);
+            log.warn("cluster maintenance task {} failed", name, e);
         } finally {
-            maintenanceRunning.set(false);
+            maintenanceTasksRunning.remove(name);
         }
     }
 

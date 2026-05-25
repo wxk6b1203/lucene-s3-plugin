@@ -23,7 +23,7 @@ final class SearchResponseMerger {
         int from = Math.min(request.searchAfter().isEmpty() ? Math.max(0, request.from()) : 0, hits.size());
         int to = Math.min(from + Math.max(0, request.size()), hits.size());
         return new SearchResponse(
-                (System.nanoTime() - started) / 1_000_000,
+                elapsedMillis(started),
                 responses.stream().mapToInt(SearchResponse::totalShards).sum(),
                 responses.stream().mapToInt(SearchResponse::successfulShards).sum(),
                 responses.stream().mapToInt(SearchResponse::failedShards).sum(),
@@ -31,6 +31,11 @@ final class SearchResponseMerger {
                 mergeAggregations(responses),
                 failures
         );
+    }
+
+    private static long elapsedMillis(long started) {
+        long elapsedNanos = Math.max(0, System.nanoTime() - started);
+        return elapsedNanos == 0 ? 0 : Math.max(1, (elapsedNanos + 999_999) / 1_000_000);
     }
 
     private static int compareHits(SearchHit left, SearchHit right, List<Map<String, Object>> sort) {

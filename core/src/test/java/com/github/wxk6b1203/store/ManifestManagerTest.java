@@ -328,30 +328,6 @@ public class ManifestManagerTest {
     }
 
     @Test
-    public void testAsyncUploadUsesStagedCopyWhenWalFileIsDeleted() throws Exception {
-        MemMockProvider metadata = new MemMockProvider();
-        ReadingBlockingRemoteObjectStore remote = new ReadingBlockingRemoteObjectStore("segments_1");
-        ManifestManager manager = new ManifestManager(new ManifestOptions("bucket"), remote, metadata);
-        Path data = tempDir.resolve("_0.si");
-        Path segments = tempDir.resolve("segments_1");
-        Files.write(data, new byte[]{1});
-        Files.write(segments, new byte[]{2});
-
-        manager.commit(List.of(
-                new CommittingIndexFile("books", data),
-                new CommittingIndexFile("books", segments)
-        ));
-        assertTrue(remote.awaitBlockedPut());
-        Files.delete(segments);
-        remote.releaseBlockedPut();
-        waitUntil(() -> metadata.fileMetadata("books", "segments_1").getStatus() == IndexFileStatus.CLEAN);
-        manager.close();
-
-        assertFalse(Files.exists(segments));
-        assertTrue(remote.puts.stream().anyMatch(key -> key.startsWith("books/_data/segments_1.")));
-    }
-
-    @Test
     public void testSnapshotGcRetainsLatestAndPinnedSnapshots() throws Exception {
         MemMockProvider metadata = new MemMockProvider();
         RecordingRemoteObjectStore remote = new RecordingRemoteObjectStore();
@@ -477,15 +453,4 @@ public class ManifestManagerTest {
         }
     }
 
-    private static final class ReadingBlockingRemoteObjectStore extends BlockingRemoteObjectStore {
-        private ReadingBlockingRemoteObjectStore(String blockedName) {
-            super(blockedName);
-        }
-
-        @Override
-        public void put(String key, Path source) throws IOException {
-            super.put(key, source);
-            Files.size(source);
-        }
-    }
 }

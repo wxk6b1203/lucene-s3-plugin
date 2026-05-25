@@ -44,6 +44,9 @@ final class HttpApiResponses {
         if (cause instanceof NotMasterException) {
             return 503;
         }
+        if ("IndexNotFoundException".equals(cause.getClass().getSimpleName()) || messageContains(cause, "no segments")) {
+            return 503;
+        }
         if (cause instanceof NoSuchFileException || messageContains(cause, "not found") || messageContains(cause, "expired")) {
             return 404;
         }
@@ -73,6 +76,11 @@ final class HttpApiResponses {
             return 500;
         }
         if (cause instanceof IOException) {
+            if (messageContains(cause, "no space left")
+                    || messageContains(cause, "too many open files")
+                    || messageContains(cause, "resource temporarily unavailable")) {
+                return 503;
+            }
             return 500;
         }
         if (cause instanceof IllegalArgumentException) {
