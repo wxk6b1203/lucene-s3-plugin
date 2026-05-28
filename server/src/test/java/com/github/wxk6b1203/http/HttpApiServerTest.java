@@ -3,6 +3,7 @@ package com.github.wxk6b1203.http;
 import com.github.wxk6b1203.cluster.FieldMapping;
 import com.github.wxk6b1203.cluster.NodeRole;
 import com.github.wxk6b1203.config.ServerOptions;
+import com.github.wxk6b1203.index.IndexWriteOptions;
 import com.github.wxk6b1203.search.SearchRequest;
 import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.util.JsonUtil;
@@ -37,6 +38,25 @@ class HttpApiServerTest {
 
     private HttpApiServer server;
     private int port;
+
+    @Test
+    void writeMaintenanceIntervalUsesConfiguredSubSecondCadence() {
+        assertEquals(100, HttpApiServer.writeMaintenanceIntervalMillis(new IndexWriteOptions(
+                false,
+                0,
+                Duration.ofMillis(100),
+                IndexWriteOptions.RefreshPolicy.IMMEDIATE,
+                Duration.ofSeconds(1)
+        )));
+        assertEquals(50, HttpApiServer.writeMaintenanceIntervalMillis(new IndexWriteOptions(
+                false,
+                0,
+                Duration.ofMillis(500),
+                IndexWriteOptions.RefreshPolicy.INTERVAL,
+                Duration.ofMillis(50)
+        )));
+        assertEquals(0, HttpApiServer.writeMaintenanceIntervalMillis(IndexWriteOptions.defaults()));
+    }
 
     @AfterEach
     void closeServer() {
@@ -727,6 +747,11 @@ class HttpApiServerTest {
                 10,
                 uploadWaitStrategy,
                 5,
+                true,
+                0,
+                0,
+                "immediate",
+                1000,
                 null,
                 0,
                 60,

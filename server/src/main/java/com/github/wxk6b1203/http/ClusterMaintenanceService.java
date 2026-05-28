@@ -1,14 +1,6 @@
 package com.github.wxk6b1203.http;
 
-import com.github.wxk6b1203.cluster.ClusterCoordinator;
-import com.github.wxk6b1203.cluster.ClusterNode;
-import com.github.wxk6b1203.cluster.ClusterState;
-import com.github.wxk6b1203.cluster.ClusterStateRepository;
-import com.github.wxk6b1203.cluster.IndexLifecyclePolicy;
-import com.github.wxk6b1203.cluster.LifecyclePhase;
-import com.github.wxk6b1203.cluster.ShardId;
-import com.github.wxk6b1203.cluster.ShardRouting;
-import com.github.wxk6b1203.cluster.ShardState;
+import com.github.wxk6b1203.cluster.*;
 import com.github.wxk6b1203.index.LocalShardIndexService;
 import com.github.wxk6b1203.metadata.common.IndexCommitSnapshot;
 import com.github.wxk6b1203.metadata.common.IndexFileMetadata;
@@ -22,11 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -56,10 +44,14 @@ final class ClusterMaintenanceService {
     private final Set<String> lifecycleDeletesInProgress = ConcurrentHashMap.newKeySet();
     private final Set<String> lifecycleForceMergesInProgress = ConcurrentHashMap.newKeySet();
     private final Set<String> lifecycleForceMergesCompleted = ConcurrentHashMap.newKeySet();
+    private final Object scopeLock = new Object();
+    private final Set<String> indexScopes = ConcurrentHashMap.newKeySet();
+    private final Set<String> shardScopes = ConcurrentHashMap.newKeySet();
     private volatile Instant lastCacheCleanup = Instant.EPOCH;
     private volatile LocalCacheManager.CleanupStats lastCacheCleanupStats = new LocalCacheManager.CleanupStats(0, 0, 0, 0);
 
     enum MaintenanceTask {
+        WRITE_MAINTENANCE,
         UPLOAD_RETRY,
         SNAPSHOT_GC,
         LIFECYCLE,
@@ -106,6 +98,7 @@ final class ClusterMaintenanceService {
 
     void run(MaintenanceTask task) {
         switch (task) {
+            case WRITE_MAINTENANCE -> runWriteMaintenance();
             case UPLOAD_RETRY -> retryOwnedShardUploads();
             case SNAPSHOT_GC -> runSnapshotGarbageCollection();
             case LIFECYCLE -> runLifecyclePolicies();
@@ -134,11 +127,57 @@ final class ClusterMaintenanceService {
         return result;
     }
 
+    void deleteIndexDataWithScope(String indexName, int numberOfShards) throws IOException {
+        if (!tryAcquireIndexScope(indexName)) {
+            throw new IllegalStateException("conflict: index maintenance is running: " + indexName);
+        }
+        try {
+            indexDataDeleter.deleteIndexAndData(indexName, numberOfShards);
+        } finally {
+            releaseIndexScope(indexName);
+        }
+    }
+
     void retryOwnedShardUploads() {
         try {
             retryOwnedShardUploads(clusterStateRepository.current(), null);
         } catch (IOException e) {
             log.warn("failed to retry pending shard uploads", e);
+        }
+    }
+
+    void runWriteMaintenance() {
+        ClusterState state;
+        try {
+            state = clusterStateRepository.current();
+        } catch (IOException e) {
+            log.warn("failed to load cluster state for write maintenance", e);
+            return;
+        }
+        List<ShardId> shardIds = state.routingTable().stream()
+                .filter(routing -> routing.state() == ShardState.STARTED)
+                .filter(routing -> localNode.id().equals(routing.nodeId()))
+                .filter(routing -> {
+                    var settings = state.indices().get(routing.shardId().indexName());
+                    return settings != null && !settings.deletePending();
+                })
+                .map(ShardRouting::shardId)
+                .toList();
+        List<ShardId> acquired = new ArrayList<>(shardIds.size());
+        for (ShardId shardId : shardIds) {
+            if (tryAcquireShardScope(shardId)) {
+                acquired.add(shardId);
+            }
+        }
+        if (acquired.isEmpty()) {
+            return;
+        }
+        try {
+            localShardIndexService.runWriteMaintenance(acquired);
+        } catch (IOException e) {
+            log.warn("failed to run local write maintenance", e);
+        } finally {
+            acquired.forEach(this::releaseShardScope);
         }
     }
 
@@ -159,12 +198,21 @@ final class ClusterMaintenanceService {
                 manifestMetadataManager
         )) {
             state.indices().forEach((indexName, settings) -> {
+                if (settings.deletePending()) {
+                    return;
+                }
                 for (int shard = 0; shard < settings.numberOfShards(); shard++) {
                     String physicalIndexName = physicalIndexName(indexName, shard);
+                    ShardId shardId = new ShardId(indexName, shard);
+                    if (!tryAcquireShardScope(shardId)) {
+                        continue;
+                    }
                     try {
                         manifestManager.garbageCollectSnapshots(physicalIndexName, snapshotRetainLatest);
                     } catch (Exception e) {
                         log.warn("failed to garbage collect snapshots for {}", physicalIndexName, e);
+                    } finally {
+                        releaseShardScope(shardId);
                     }
                 }
             });
@@ -176,10 +224,21 @@ final class ClusterMaintenanceService {
                 .filter(routing -> routing.state() == ShardState.STARTED)
                 .filter(routing -> localNode.id().equals(routing.nodeId()))
                 .filter(routing -> indexFilter == null || indexFilter.equals(routing.shardId().indexName()))
+                .filter(routing -> {
+                    var settings = state.indices().get(routing.shardId().indexName());
+                    return settings != null && !settings.deletePending();
+                })
                 .map(ShardRouting::shardId)
                 .toList();
-        if (!shardIds.isEmpty()) {
-            localShardIndexService.retryPendingUploads(shardIds);
+        for (ShardId shardId : shardIds) {
+            if (!tryAcquireShardScope(shardId)) {
+                continue;
+            }
+            try {
+                localShardIndexService.retryPendingUploads(List.of(shardId));
+            } finally {
+                releaseShardScope(shardId);
+            }
         }
     }
 
@@ -314,6 +373,9 @@ final class ClusterMaintenanceService {
         if (settings == null) {
             return;
         }
+        if (settings.deletePending()) {
+            return;
+        }
         IndexLifecyclePolicy policy = lifecyclePolicy(state, settings.lifecyclePolicy());
         if (policy == null) {
             return;
@@ -330,6 +392,10 @@ final class ClusterMaintenanceService {
         if (lifecycleForceMergesCompleted.contains(key) || !lifecycleForceMergesInProgress.add(key)) {
             return;
         }
+        if (!tryAcquireShardScope(routing.shardId())) {
+            lifecycleForceMergesInProgress.remove(key);
+            return;
+        }
         try {
             localShardIndexService.forceMerge(routing.shardId(), 1);
             lifecycleForceMergesCompleted.add(key);
@@ -337,6 +403,7 @@ final class ClusterMaintenanceService {
         } catch (Exception e) {
             log.warn("failed to force-merge shard {} by warm lifecycle policy {}", routing.shardId().routeKey(), policy.name(), e);
         } finally {
+            releaseShardScope(routing.shardId());
             lifecycleForceMergesInProgress.remove(key);
         }
     }
@@ -358,12 +425,17 @@ final class ClusterMaintenanceService {
             if (indexAgeMillis < deleteAgeMillis || !lifecycleDeletesInProgress.add(indexName)) {
                 return;
             }
+            if (!tryAcquireIndexScope(indexName)) {
+                lifecycleDeletesInProgress.remove(indexName);
+                return;
+            }
             try {
                 indexDataDeleter.deleteIndexAndData(indexName, settings.numberOfShards());
                 log.info("deleted index {} by lifecycle policy {}", indexName, policy.name());
             } catch (Exception e) {
                 log.warn("failed to delete index {} by lifecycle policy {}", indexName, policy.name(), e);
             } finally {
+                releaseIndexScope(indexName);
                 lifecycleDeletesInProgress.remove(indexName);
             }
         });
@@ -374,12 +446,17 @@ final class ClusterMaintenanceService {
             if (!settings.deletePending() || !lifecycleDeletesInProgress.add(indexName)) {
                 return;
             }
+            if (!tryAcquireIndexScope(indexName)) {
+                lifecycleDeletesInProgress.remove(indexName);
+                return;
+            }
             try {
                 indexDataDeleter.deleteIndexAndData(indexName, settings.numberOfShards());
                 log.info("completed pending delete for index {}", indexName);
             } catch (Exception e) {
                 log.warn("failed to complete pending delete for index {}", indexName, e);
             } finally {
+                releaseIndexScope(indexName);
                 lifecycleDeletesInProgress.remove(indexName);
             }
         });
@@ -406,6 +483,44 @@ final class ClusterMaintenanceService {
 
     private String physicalIndexName(String indexName, int shard) {
         return indexName + "__shard_" + shard;
+    }
+
+    private boolean tryAcquireIndexScope(String indexName) {
+        synchronized (scopeLock) {
+            if (indexScopes.contains(indexName) || hasShardScope(indexName)) {
+                return false;
+            }
+            indexScopes.add(indexName);
+            return true;
+        }
+    }
+
+    private void releaseIndexScope(String indexName) {
+        synchronized (scopeLock) {
+            indexScopes.remove(indexName);
+        }
+    }
+
+    private boolean tryAcquireShardScope(ShardId shardId) {
+        synchronized (scopeLock) {
+            String key = shardId.routeKey();
+            if (indexScopes.contains(shardId.indexName()) || shardScopes.contains(key)) {
+                return false;
+            }
+            shardScopes.add(key);
+            return true;
+        }
+    }
+
+    private void releaseShardScope(ShardId shardId) {
+        synchronized (scopeLock) {
+            shardScopes.remove(shardId.routeKey());
+        }
+    }
+
+    private boolean hasShardScope(String indexName) {
+        String prefix = indexName + "[";
+        return shardScopes.stream().anyMatch(scope -> scope.startsWith(prefix));
     }
 
     interface IndexDataDeleter {

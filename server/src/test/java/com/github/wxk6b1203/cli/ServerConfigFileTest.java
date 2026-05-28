@@ -43,6 +43,14 @@ class ServerConfigFileTest {
                     cleanupIntervalSeconds: 30
                   metrics:
                     port: 9500
+                  index:
+                    commit:
+                      everyRequest: false
+                      intervalMillis: 2500
+                      afterDocs: 128
+                    refresh:
+                      policy: interval
+                      intervalMillis: 1500
                   analyzer:
                     pluginPath: plugins/analyzers
                   s3:
@@ -75,6 +83,11 @@ class ServerConfigFileTest {
         assertEquals(1048576, options.cacheMaxBytes());
         assertEquals(30, options.cacheCleanupIntervalSeconds());
         assertEquals(9500, options.metricsPort());
+        assertEquals(false, options.commitEveryRequest());
+        assertEquals(2500, options.commitIntervalMillis());
+        assertEquals(128, options.commitAfterDocs());
+        assertEquals("interval", options.refreshPolicy());
+        assertEquals(1500, options.refreshIntervalMillis());
         assertEquals("plugins/analyzers", options.analyzerPluginPath());
         assertEquals("yaml-bucket", options.s3Bucket());
         assertEquals("us-east-1", options.s3Region());
@@ -115,7 +128,12 @@ class ServerConfigFileTest {
                 "--etcd-timeout", "6",
                 "--cache-max-bytes", "4096",
                 "--cache-cleanup-interval", "45",
-                "--metrics-port", "9600"
+                "--metrics-port", "9600",
+                "--commit-every-request=false",
+                "--commit-interval", "750",
+                "--commit-after-docs", "64",
+                "--refresh-policy", "interval",
+                "--refresh-interval", "500"
         );
         ServerOptions options = command.options();
 
@@ -130,5 +148,10 @@ class ServerConfigFileTest {
         assertEquals(4096, options.cacheMaxBytes());
         assertEquals(45, options.cacheCleanupIntervalSeconds());
         assertEquals(9600, options.metricsPort());
+        assertEquals(false, options.commitEveryRequest());
+        assertEquals(750, options.commitIntervalMillis());
+        assertEquals(64, options.commitAfterDocs());
+        assertEquals("interval", options.refreshPolicy());
+        assertEquals(500, options.refreshIntervalMillis());
     }
 }

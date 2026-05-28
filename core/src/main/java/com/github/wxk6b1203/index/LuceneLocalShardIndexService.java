@@ -27,26 +27,15 @@ import org.apache.lucene.util.NumericUtils;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileVisitResult;
-import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
-import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
+import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
+import java.time.*;
 import java.time.format.DateTimeParseException;
-import java.util.Base64;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 public class LuceneLocalShardIndexService implements LocalShardIndexService {
@@ -57,6 +46,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     private final Path basePath;
     private final String bucket;
     private final ManifestOptions manifestOptions;
+    private final IndexWriteOptions writeOptions;
     private final ManifestMetadataManager metadataManager;
     private final RemoteObjectStore remoteObjectStore;
     private final ExecutorService uploadWorkerPool;
@@ -93,9 +83,22 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             ManifestOptions manifestOptions,
             Path analyzerPluginPath
     ) {
+        this(basePath, bucket, metadataManager, remoteObjectStore, manifestOptions, analyzerPluginPath, IndexWriteOptions.defaults());
+    }
+
+    public LuceneLocalShardIndexService(
+            Path basePath,
+            String bucket,
+            ManifestMetadataManager metadataManager,
+            RemoteObjectStore remoteObjectStore,
+            ManifestOptions manifestOptions,
+            Path analyzerPluginPath,
+            IndexWriteOptions writeOptions
+    ) {
         this.basePath = basePath;
         this.bucket = bucket;
         this.manifestOptions = manifestOptions == null ? new ManifestOptions(bucket) : manifestOptions;
+        this.writeOptions = writeOptions == null ? IndexWriteOptions.defaults() : writeOptions;
         this.metadataManager = metadataManager;
         this.remoteObjectStore = remoteObjectStore;
         this.analyzerRegistry = new AnalyzerRegistry(analyzerPluginPath);
@@ -119,7 +122,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             } else {
                 shardWriter.writer.updateDocument(new Term("_id", id), document);
             }
-            commitAndRefresh(shardWriter);
+            finishWrite(shardWriter, 1);
         }
         return new IndexDocumentResponse(
                 request.indexName(),
@@ -138,7 +141,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         ShardWriter shardWriter = writers.computeIfAbsent(request.shardId(), this::openShardWriter);
         synchronized (shardWriter) {
             shardWriter.writer.deleteDocuments(new Term("_id", request.id()));
-            commitAndRefresh(shardWriter);
+            finishWrite(shardWriter, 1);
         }
         return new IndexDocumentResponse(request.indexName(), request.shardId(), request.id(), "deleted", true);
     }
@@ -208,7 +211,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
             if (!successfulPositions.isEmpty()) {
                 try {
-                    commitAndRefresh(shardWriter);
+                    finishWrite(shardWriter, successfulPositions.size());
                 } catch (Exception e) {
                     for (Integer position : successfulPositions) {
                         results.set(position, IndexDocumentOperationResult.failure(e));
@@ -783,7 +786,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 deleted = new IndexSearcher(reader).count(query);
             }
             shardWriter.writer.deleteDocuments(query);
-            commitAndRefresh(shardWriter);
+            finishWrite(shardWriter, deleted > 0 ? saturatedInt(deleted) : 0);
         }
         return new ByQueryResponse(null, "delete_by_query", "deleted=" + deleted);
     }
@@ -818,7 +821,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                     after = topDocs.scoreDocs[topDocs.scoreDocs.length - 1];
                 }
             }
-            commitAndRefresh(shardWriter);
+            finishWrite(shardWriter, updated > 0 ? saturatedInt(updated) : 0);
         }
         return new ByQueryResponse(null, "update_by_query", "updated=" + updated);
     }
@@ -828,7 +831,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         ShardWriter shardWriter = writers.computeIfAbsent(shardId, this::openShardWriter);
         synchronized (shardWriter) {
             shardWriter.writer.forceMerge(Math.max(1, maxNumSegments));
-            commitAndRefresh(shardWriter);
+            finishWrite(shardWriter, 0, true, true);
         }
     }
 
@@ -945,7 +948,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                         deletionPolicy,
                         new ArrayList<>(),
                         new AtomicInteger(),
-                        new AtomicInteger()
+                        new AtomicInteger(),
+                        new AtomicInteger(),
+                        new AtomicLong(System.nanoTime()),
+                        new AtomicLong(System.nanoTime()),
+                        new AtomicBoolean(false)
                 );
             } catch (IOException | RuntimeException e) {
                 try {
@@ -998,9 +1005,96 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         return new ManifestManager(manifestOptions, remoteObjectStore, metadataManager, uploadWorkerPool);
     }
 
-    private void commitAndRefresh(ShardWriter shardWriter) throws IOException {
+    private void finishWrite(ShardWriter shardWriter, int changedOperations) throws IOException {
+        finishWrite(shardWriter, changedOperations, false, false);
+    }
+
+    private void finishWrite(
+            ShardWriter shardWriter,
+            int changedOperations,
+            boolean forceCommit,
+            boolean forceRefresh
+    ) throws IOException {
+        if (changedOperations > 0) {
+            shardWriter.uncommittedOperations.addAndGet(changedOperations);
+            shardWriter.refreshPending.set(true);
+        }
+        if (forceCommit || shouldCommit(shardWriter)) {
+            commitAndPublish(shardWriter);
+        }
+        if (forceRefresh || writeOptions.refreshPolicy() == IndexWriteOptions.RefreshPolicy.IMMEDIATE) {
+            refreshSearcher(shardWriter);
+        }
+    }
+
+    @Override
+    public void runWriteMaintenance() throws IOException {
+        runWriteMaintenance(List.copyOf(writers.keySet()));
+    }
+
+    @Override
+    public void runWriteMaintenance(Collection<ShardId> shardIds) throws IOException {
+        IOException failure = null;
+        for (ShardId shardId : new LinkedHashSet<>(shardIds == null ? List.copyOf(writers.keySet()) : shardIds)) {
+            ShardWriter shardWriter = writers.get(shardId);
+            if (shardWriter == null) {
+                continue;
+            }
+            synchronized (shardWriter) {
+                try {
+                    if (shouldCommit(shardWriter)) {
+                        commitAndPublish(shardWriter);
+                    }
+                    if (shouldRefresh(shardWriter)) {
+                        refreshSearcher(shardWriter);
+                    }
+                } catch (IOException e) {
+                    failure = addFailure(failure, e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private boolean shouldCommit(ShardWriter shardWriter) {
+        int uncommittedOperations = shardWriter.uncommittedOperations.get();
+        if (uncommittedOperations <= 0) {
+            return false;
+        }
+        if (writeOptions.commitEveryRequest()) {
+            return true;
+        }
+        if (writeOptions.commitAfterDocs() > 0 && uncommittedOperations >= writeOptions.commitAfterDocs()) {
+            return true;
+        }
+        return !writeOptions.commitInterval().isZero()
+                && System.nanoTime() - shardWriter.lastCommitNanos.get() >= writeOptions.commitInterval().toNanos();
+    }
+
+    private boolean shouldRefresh(ShardWriter shardWriter) {
+        if (!shardWriter.refreshPending.get()
+                || writeOptions.refreshPolicy() != IndexWriteOptions.RefreshPolicy.INTERVAL) {
+            return false;
+        }
+        return System.nanoTime() - shardWriter.lastRefreshNanos.get() >= writeOptions.refreshInterval().toNanos();
+    }
+
+    private void refreshSearcher(ShardWriter shardWriter) throws IOException {
+        if (!shardWriter.refreshPending.get()) {
+            return;
+        }
+        shardWriter.searcherManager.maybeRefreshBlocking();
+        shardWriter.refreshPending.set(false);
+        shardWriter.lastRefreshNanos.set(System.nanoTime());
+    }
+
+    private void commitAndPublish(ShardWriter shardWriter) throws IOException {
         long commitStarted = System.nanoTime();
         shardWriter.writer.commit();
+        shardWriter.uncommittedOperations.set(0);
+        shardWriter.lastCommitNanos.set(System.nanoTime());
         warnSlowCommit(shardWriter, commitStarted);
         IndexCommit commit = shardWriter.deletionPolicy.snapshot();
         RetainedSnapshotCommit retained = retainSnapshotCommit(shardWriter, commit);
@@ -1019,7 +1113,6 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             releaseSnapshotCommit(shardWriter, retained);
             throw e;
         }
-        shardWriter.searcherManager.maybeRefreshBlocking();
     }
 
     private void warnSlowCommit(ShardWriter shardWriter, long started) {
@@ -1031,6 +1124,10 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                     elapsedNanos / 1_000_000
             );
         }
+    }
+
+    private int saturatedInt(long value) {
+        return value >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;
     }
 
     private RetainedSnapshotCommit retainSnapshotCommit(ShardWriter shardWriter, IndexCommit commit) {
@@ -2369,6 +2466,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 }
             }
         }
+        try {
+            flushPendingWrites();
+        } catch (IOException e) {
+            failure = addFailure(failure, e);
+        }
         for (ShardWriter writer : writers.values()) {
             try {
                 writer.close();
@@ -2391,6 +2493,25 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             uploadWorkerPool.shutdownNow();
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private void flushPendingWrites() throws IOException {
+        IOException failure = null;
+        for (ShardWriter shardWriter : List.copyOf(writers.values())) {
+            synchronized (shardWriter) {
+                try {
+                    if (shardWriter.uncommittedOperations.get() > 0) {
+                        commitAndPublish(shardWriter);
+                    }
+                    refreshSearcher(shardWriter);
+                } catch (IOException e) {
+                    failure = addFailure(failure, e);
+                }
+            }
         }
         if (failure != null) {
             throw failure;
@@ -2476,7 +2597,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             SnapshotDeletionPolicy deletionPolicy,
             List<RetainedSnapshotCommit> retainedSnapshotCommits,
             AtomicInteger nextSnapshotSequence,
-            AtomicInteger cleanPublishedSnapshotSequence
+            AtomicInteger cleanPublishedSnapshotSequence,
+            AtomicInteger uncommittedOperations,
+            AtomicLong lastCommitNanos,
+            AtomicLong lastRefreshNanos,
+            AtomicBoolean refreshPending
     ) implements AutoCloseable {
         @Override
         public void close() throws IOException {

@@ -27,6 +27,11 @@ public record ServerOptions(
         int httpForwardTimeoutSeconds,
         String uploadWaitStrategy,
         int uploadWaitTimeoutSeconds,
+        boolean commitEveryRequest,
+        int commitIntervalMillis,
+        int commitAfterDocs,
+        String refreshPolicy,
+        int refreshIntervalMillis,
         String analyzerPluginPath,
         long cacheMaxBytes,
         int cacheCleanupIntervalSeconds,
@@ -39,6 +44,12 @@ public record ServerOptions(
                 ? "async"
                 : uploadWaitStrategy.trim();
         uploadWaitTimeoutSeconds = Math.max(1, uploadWaitTimeoutSeconds);
+        commitIntervalMillis = Math.max(0, commitIntervalMillis);
+        commitAfterDocs = Math.max(0, commitAfterDocs);
+        refreshPolicy = refreshPolicy == null || refreshPolicy.isBlank()
+                ? "immediate"
+                : refreshPolicy.trim();
+        refreshIntervalMillis = Math.max(1, refreshIntervalMillis);
         analyzerPluginPath = analyzerPluginPath == null || analyzerPluginPath.isBlank()
                 ? null
                 : analyzerPluginPath.trim();
@@ -89,6 +100,11 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                true,
+                0,
+                0,
+                "immediate",
+                1000,
                 null,
                 0,
                 60,
@@ -139,6 +155,11 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                true,
+                0,
+                0,
+                "immediate",
+                1000,
                 null,
                 0,
                 60,
@@ -191,6 +212,11 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                true,
+                0,
+                0,
+                "immediate",
+                1000,
                 null,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
@@ -244,6 +270,11 @@ public record ServerOptions(
                 10,
                 "async",
                 30,
+                true,
+                0,
+                0,
+                "immediate",
+                1000,
                 null,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
