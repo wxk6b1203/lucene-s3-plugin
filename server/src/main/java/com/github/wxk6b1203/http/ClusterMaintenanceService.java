@@ -154,15 +154,21 @@ final class ClusterMaintenanceService {
             log.warn("failed to load cluster state for write maintenance", e);
             return;
         }
-        List<ShardId> shardIds = state.routingTable().stream()
+        Set<ShardId> shardIds = state.routingTable().stream()
                 .filter(routing -> routing.state() == ShardState.STARTED)
                 .filter(routing -> localNode.id().equals(routing.nodeId()))
-                .filter(routing -> {
-                    var settings = state.indices().get(routing.shardId().indexName());
-                    return settings != null && !settings.deletePending();
-                })
                 .map(ShardRouting::shardId)
-                .toList();
+                .filter(shardId -> maintenanceEligible(state, shardId))
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        try {
+            for (ShardId shardId : localShardIndexService.shardIdsWithPendingWrites()) {
+                if (maintenanceEligible(state, shardId)) {
+                    shardIds.add(shardId);
+                }
+            }
+        } catch (IOException e) {
+            log.warn("failed to list local shards with pending writes", e);
+        }
         List<ShardId> acquired = new ArrayList<>(shardIds.size());
         for (ShardId shardId : shardIds) {
             if (tryAcquireShardScope(shardId)) {
@@ -179,6 +185,11 @@ final class ClusterMaintenanceService {
         } finally {
             acquired.forEach(this::releaseShardScope);
         }
+    }
+
+    private boolean maintenanceEligible(ClusterState state, ShardId shardId) {
+        var settings = state.indices().get(shardId.indexName());
+        return settings != null && !settings.deletePending();
     }
 
     void runSnapshotGarbageCollection() {
@@ -220,16 +231,19 @@ final class ClusterMaintenanceService {
     }
 
     private void retryOwnedShardUploads(ClusterState state, String indexFilter) throws IOException {
-        List<ShardId> shardIds = state.routingTable().stream()
+        Set<ShardId> shardIds = state.routingTable().stream()
                 .filter(routing -> routing.state() == ShardState.STARTED)
                 .filter(routing -> localNode.id().equals(routing.nodeId()))
-                .filter(routing -> indexFilter == null || indexFilter.equals(routing.shardId().indexName()))
-                .filter(routing -> {
-                    var settings = state.indices().get(routing.shardId().indexName());
-                    return settings != null && !settings.deletePending();
-                })
                 .map(ShardRouting::shardId)
-                .toList();
+                .filter(shardId -> indexFilter == null || indexFilter.equals(shardId.indexName()))
+                .filter(shardId -> maintenanceEligible(state, shardId))
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        for (ShardId shardId : localShardIndexService.shardIdsWithPendingUploads()) {
+            if ((indexFilter == null || indexFilter.equals(shardId.indexName()))
+                    && maintenanceEligible(state, shardId)) {
+                shardIds.add(shardId);
+            }
+        }
         for (ShardId shardId : shardIds) {
             if (!tryAcquireShardScope(shardId)) {
                 continue;

@@ -110,6 +110,85 @@ class ClusterMaintenanceServiceTest {
     }
 
     @Test
+    void writeMaintenanceIncludesPendingLocalWritesAfterOwnershipMoves() {
+        ClusterNode node1 = new ClusterNode(
+                "node-1",
+                "node-1",
+                "127.0.0.1",
+                9200,
+                Set.of(NodeRole.MASTER, NodeRole.DATA),
+                Instant.now()
+        );
+        ClusterNode node2 = new ClusterNode(
+                "node-2",
+                "node-2",
+                "127.0.0.1",
+                9201,
+                Set.of(NodeRole.DATA),
+                Instant.now()
+        );
+        ShardId shardId = new ShardId("books", 0);
+        ClusterState state = new ClusterState(
+                "test",
+                1,
+                node1.id(),
+                Map.of(node1.id(), node1, node2.id(), node2),
+                Map.of("books", new IndexSettings("books", 1, null, Instant.now())),
+                List.of(new ShardRouting(shardId, ShardState.STARTED, node2.id(), 1, 1)),
+                Map.of(),
+                Instant.now()
+        );
+        BlockingShardService localShardService = new BlockingShardService();
+        localShardService.pendingWriteShardIds = List.of(shardId);
+        ClusterMaintenanceService service = newService(node1, state, localShardService, (index, shards) -> {
+        });
+
+        service.run(ClusterMaintenanceService.MaintenanceTask.WRITE_MAINTENANCE);
+
+        assertEquals(Set.of(shardId), Set.copyOf(localShardService.writeMaintenanceShardIds));
+    }
+
+    @Test
+    void uploadRetryIncludesPendingLocalUploadsAfterOwnershipMoves() {
+        ClusterNode node1 = new ClusterNode(
+                "node-1",
+                "node-1",
+                "127.0.0.1",
+                9200,
+                Set.of(NodeRole.MASTER, NodeRole.DATA),
+                Instant.now()
+        );
+        ClusterNode node2 = new ClusterNode(
+                "node-2",
+                "node-2",
+                "127.0.0.1",
+                9201,
+                Set.of(NodeRole.DATA),
+                Instant.now()
+        );
+        ShardId shardId = new ShardId("books", 0);
+        ClusterState state = new ClusterState(
+                "test",
+                1,
+                node1.id(),
+                Map.of(node1.id(), node1, node2.id(), node2),
+                Map.of("books", new IndexSettings("books", 1, null, Instant.now())),
+                List.of(new ShardRouting(shardId, ShardState.STARTED, node2.id(), 1, 1)),
+                Map.of(),
+                Instant.now()
+        );
+        BlockingShardService localShardService = new BlockingShardService();
+        localShardService.pendingUploadShardIds = List.of(shardId);
+        localShardService.releaseRetry.countDown();
+        ClusterMaintenanceService service = newService(node1, state, localShardService, (index, shards) -> {
+        });
+
+        service.run(ClusterMaintenanceService.MaintenanceTask.UPLOAD_RETRY);
+
+        assertEquals(Set.of(shardId), Set.copyOf(localShardService.retryShardIds));
+    }
+
+    @Test
     @Timeout(10)
     void indexDeleteWaitsForWriteMaintenanceToFinish() throws Exception {
         ClusterNode node = new ClusterNode(
@@ -208,6 +287,10 @@ class ClusterMaintenanceServiceTest {
         private final CountDownLatch writeMaintenanceStarted = new CountDownLatch(1);
         private final CountDownLatch releaseWriteMaintenance = new CountDownLatch(1);
         private final AtomicInteger writeMaintenanceRuns = new AtomicInteger();
+        private volatile Collection<ShardId> pendingWriteShardIds = List.of();
+        private volatile Collection<ShardId> pendingUploadShardIds = List.of();
+        private volatile Collection<ShardId> writeMaintenanceShardIds = List.of();
+        private volatile Collection<ShardId> retryShardIds = List.of();
         private volatile boolean blockWriteMaintenance;
 
         @Override
@@ -256,6 +339,7 @@ class ClusterMaintenanceServiceTest {
 
         @Override
         public void retryPendingUploads(Collection<ShardId> shardIds) throws IOException {
+            retryShardIds = List.copyOf(shardIds);
             retryStarted.countDown();
             try {
                 releaseRetry.await();
@@ -266,7 +350,18 @@ class ClusterMaintenanceServiceTest {
         }
 
         @Override
+        public Collection<ShardId> shardIdsWithPendingWrites() {
+            return pendingWriteShardIds;
+        }
+
+        @Override
+        public Collection<ShardId> shardIdsWithPendingUploads() {
+            return pendingUploadShardIds;
+        }
+
+        @Override
         public void runWriteMaintenance(Collection<ShardId> shardIds) throws IOException {
+            writeMaintenanceShardIds = List.copyOf(shardIds);
             writeMaintenanceRuns.incrementAndGet();
             writeMaintenanceStarted.countDown();
             if (!blockWriteMaintenance) {

@@ -918,6 +918,30 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     @Override
+    public Collection<ShardId> shardIdsWithPendingWrites() {
+        return writers.entrySet()
+                .stream()
+                .filter(entry -> entry.getValue().uncommittedOperations.get() > 0)
+                .map(Map.Entry::getKey)
+                .toList();
+    }
+
+    @Override
+    public Collection<ShardId> shardIdsWithPendingUploads() {
+        return writers.keySet()
+                .stream()
+                .filter(this::hasPendingUploads)
+                .toList();
+    }
+
+    private boolean hasPendingUploads(ShardId shardId) {
+        return !metadataManager.listAll(physicalIndexName(shardId), List.of(
+                IndexFileStatus.DIRTY,
+                IndexFileStatus.UPLOADING
+        )).isEmpty();
+    }
+
+    @Override
     public int openPointInTimeCount() {
         cleanupExpiredPits();
         return pits.size();
@@ -1023,7 +1047,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             commitAndPublish(shardWriter);
         }
         if (forceRefresh || writeOptions.refreshPolicy() == IndexWriteOptions.RefreshPolicy.IMMEDIATE) {
-            refreshSearcher(shardWriter);
+            refreshSearcher(shardWriter, forceRefresh);
         }
     }
 
@@ -1082,7 +1106,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private void refreshSearcher(ShardWriter shardWriter) throws IOException {
-        if (!shardWriter.refreshPending.get()) {
+        refreshSearcher(shardWriter, false);
+    }
+
+    private void refreshSearcher(ShardWriter shardWriter, boolean force) throws IOException {
+        if (!force && !shardWriter.refreshPending.get()) {
             return;
         }
         shardWriter.searcherManager.maybeRefreshBlocking();

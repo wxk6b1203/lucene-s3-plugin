@@ -55,6 +55,14 @@ public interface LocalShardIndexService extends AutoCloseable {
 
     void retryPendingUploads(Collection<ShardId> shardIds) throws IOException;
 
+    default Collection<ShardId> shardIdsWithPendingWrites() throws IOException {
+        return List.of();
+    }
+
+    default Collection<ShardId> shardIdsWithPendingUploads() throws IOException {
+        return List.of();
+    }
+
     default void runWriteMaintenance() throws IOException {
     }
 
