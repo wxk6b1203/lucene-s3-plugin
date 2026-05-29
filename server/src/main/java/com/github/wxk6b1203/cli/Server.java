@@ -101,6 +101,21 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--upload-wait-timeout"}, description = "Timeout in seconds when upload wait strategy waits for committed files")
     private int uploadWaitTimeoutSeconds = 30;
 
+    @CommandLine.Option(names = {"--commit-every-request"}, description = "Commit and publish each successful write request: true or false. Enabled by default.")
+    private boolean commitEveryRequest = true;
+
+    @CommandLine.Option(names = {"--commit-interval"}, description = "Deferred commit interval in milliseconds when commit-every-request is disabled")
+    private int commitIntervalMillis = 1000;
+
+    @CommandLine.Option(names = {"--commit-after-docs"}, description = "Deferred commit threshold in changed documents. 0 disables the threshold.")
+    private int commitAfterDocs = 0;
+
+    @CommandLine.Option(names = {"--refresh-policy"}, description = "Refresh policy for local search visibility: immediate or interval")
+    private String refreshPolicy = "immediate";
+
+    @CommandLine.Option(names = {"--refresh-interval"}, description = "Refresh interval in milliseconds when refresh-policy=interval")
+    private int refreshIntervalMillis = 1000;
+
     @CommandLine.Option(names = {"--analyzer-plugin-path"}, description = "Directory or jar file containing third-party Lucene Analyzer plugins")
     private String analyzerPluginPath;
 
@@ -184,6 +199,30 @@ public class Server implements Callable<Integer> {
                         "uploadWaitTimeoutSeconds", "upload.waitTimeoutSeconds", "upload.wait.timeout.seconds",
                         "server.uploadWaitTimeoutSeconds", "server.upload.waitTimeoutSeconds",
                         "server.upload.wait.timeout.seconds")),
+                optionValue("--commit-every-request", commitEveryRequest, () -> config.booleanValue(commitEveryRequest,
+                        "commitEveryRequest", "commit.everyRequest", "commit.every.request",
+                        "server.commitEveryRequest", "server.commit.everyRequest", "server.commit.every.request",
+                        "server.index.commitEveryRequest", "server.index.commit.everyRequest",
+                        "server.index.commit.every.request")),
+                optionValue("--commit-interval", commitIntervalMillis, () -> config.intValue(commitIntervalMillis,
+                        "commitIntervalMillis", "commit.intervalMillis", "commit.interval.millis",
+                        "server.commitIntervalMillis", "server.commit.intervalMillis", "server.commit.interval.millis",
+                        "server.index.commitIntervalMillis", "server.index.commit.intervalMillis",
+                        "server.index.commit.interval.millis")),
+                optionValue("--commit-after-docs", commitAfterDocs, () -> config.intValue(commitAfterDocs,
+                        "commitAfterDocs", "commit.afterDocs", "commit.after.docs",
+                        "server.commitAfterDocs", "server.commit.afterDocs", "server.commit.after.docs",
+                        "server.index.commitAfterDocs", "server.index.commit.afterDocs",
+                        "server.index.commit.after.docs")),
+                optionValue("--refresh-policy", refreshPolicy, () -> config.stringValue(refreshPolicy,
+                        "refreshPolicy", "refresh.policy",
+                        "server.refreshPolicy", "server.refresh.policy",
+                        "server.index.refreshPolicy", "server.index.refresh.policy")),
+                optionValue("--refresh-interval", refreshIntervalMillis, () -> config.intValue(refreshIntervalMillis,
+                        "refreshIntervalMillis", "refresh.intervalMillis", "refresh.interval.millis",
+                        "server.refreshIntervalMillis", "server.refresh.intervalMillis", "server.refresh.interval.millis",
+                        "server.index.refreshIntervalMillis", "server.index.refresh.intervalMillis",
+                        "server.index.refresh.interval.millis")),
                 optionValue("--analyzer-plugin-path", analyzerPluginPath, () -> config.stringValue(analyzerPluginPath,
                         "analyzerPluginPath", "analyzer.pluginPath", "analyzer.plugin.path",
                         "server.analyzerPluginPath", "server.analyzer.pluginPath", "server.analyzer.plugin.path")),
@@ -233,9 +272,19 @@ public class Server implements Callable<Integer> {
         if (option == null) {
             return false;
         }
+        if (spec.commandLine().getParseResult().hasMatchedOption(option)) {
+            return true;
+        }
         for (String name : option.names()) {
             if (spec.commandLine().getParseResult().hasMatchedOption(name)) {
                 return true;
+            }
+            if (name.startsWith("--")) {
+                String negatedName = "--no-" + name.substring(2);
+                if (spec.commandLine().getParseResult().hasMatchedOption(negatedName)
+                        || spec.commandLine().getParseResult().originalArgs().contains(negatedName)) {
+                    return true;
+                }
             }
         }
         return false;

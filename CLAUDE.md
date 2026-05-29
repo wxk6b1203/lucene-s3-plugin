@@ -44,6 +44,16 @@ Dependency chain: `server → core → utility`.
 
 Every write carries `ownerTerm` and `allocationEpoch` from the routing table. The shard owner validates these against the current cluster state before accepting writes — stale or duplicate writes from a deposed owner are rejected. When forwarding write requests between nodes, the headers `x-lucene-s3-owner-term` and `x-lucene-s3-allocation-epoch` carry the fence through every hop.
 
+### Commit & Refresh Model
+
+`IndexWriteOptions` controls when Lucene commits and searcher refreshes happen:
+
+- **`commitEveryRequest` (default true):** Every successful write triggers `IndexWriter.commit()` + publish to ManifestManager, providing immediate durability and remote snapshot progress.
+- **Deferred commit:** When `commitEveryRequest=false`, commits are triggered by `commitAfterDocs` (document count threshold) or `commitInterval` (time threshold, default 1s). A background `WRITE_MAINTENANCE` task in `ClusterMaintenanceService` periodically checks these thresholds via `LuceneLocalShardIndexService.runWriteMaintenance()`.
+- **Refresh policy:** `immediate` (default) refreshes the local `SearcherManager` before every write returns, making changes visible to local `weak` reads. `interval` defers refreshes to the `WRITE_MAINTENANCE` background tick (default interval 1s), trading read-your-writes latency for higher write throughput.
+
+The `finishWrite()` method in `LuceneLocalShardIndexService` replaces the old `commitAndRefresh()`, conditionally executing commit and/or refresh based on `IndexWriteOptions` and the `forceCommit`/`forceRefresh` flags (used by `forceMerge()` which always commits and refreshes).
+
 ### Storage Pipeline: WAL → S3
 
 `S3CachingDirectory` extends Lucene's `BaseDirectory` with three storage tiers:
@@ -54,7 +64,7 @@ Every write carries `ownerTerm` and `allocationEpoch` from the routing table. Th
 | Shared cache | `/{dataPath}/_shared/{indexName}/_data/` | `NIOFSDirectory` |
 | Remote | `s3://{bucket}/{key}` | `RemoteObjectStore` |
 
-1. **Writes** go to the WAL directory. On `syncMetaData()` (triggered by `IndexWriter.finishCommit()`), committed segment files are published to `ManifestManager`.
+1. **Writes** go to the WAL directory. On `syncMetaData()` (triggered by `IndexWriter.commit()`), committed segment files are published to `ManifestManager`.
 2. **Reads** check WAL first, then shared cache, then download from S3 on-demand. Cache downloads use per-file locks for deduplication and CRC32 validation.
 3. File status lifecycle: `DIRTY → UPLOADING → CLEAN → PINNED`. Transitions use etcd CAS in `EtcdManifestMetadataManager`. S3 object keys embed `{fileName}.{checksum_hex}.{size}`, making uploads idempotent — identical content produces the same object key.
 
@@ -71,6 +81,8 @@ Every write carries `ownerTerm` and `allocationEpoch` from the routing table. Th
 - **`async` (default):** Commit returns immediately; uploads run in the background.
 - **`wait_for_upload`:** The commit call blocks until all files are uploaded and a clean snapshot is published, or until `uploadWaitTimeout` expires (default 30s). This uses `CompletableFuture.get()` with a `waitForSnapshot()` polling fallback for race conditions.
 
+With deferred commit, `wait_for_upload` only blocks on the commits that actually execute (not on every write request).
+
 ### Metadata Providers
 
 `ManifestMetadataManager` is the abstract class for file metadata storage. Two implementations:
@@ -83,7 +95,7 @@ Index settings, mappings, lifecycle policies, node membership, and shard routing
 
 Public APIs accept `weak` and `strong`:
 
-- **`weak` (default):** `SearchPlanner.hybridTarget()` checks per-shard whether a clean remote snapshot exists. If yes, the read is distributed to the least-loaded DATA node for remote/cache reads; if no, the read goes to the shard owner for local reads.
+- **`weak` (default):** Uses the `SearcherManager`-backed reader from the local shard writer when available, falling back to remote snapshot reads. When `refresh-policy=interval`, weak reads may see stale data until the next background refresh.
 - **`strong`:** Fixes a clean/pinned remote snapshot generation at plan time; every shard reads only that generation. Prevents result drift from concurrent writes.
 
 Internal shard APIs accept `owner` (read from the shard owner's local IndexWriter) and `remote` (read from a specific remote snapshot generation).
@@ -96,20 +108,30 @@ Documents require explicit field mappings (`FieldMapping` record). All types:
 
 Each field can independently control `indexed`, `stored`, `docValues`, and `multiValued`. Vector fields require `dimension` and accept `similarity` (cosine / dot_product / euclidean / maximum_inner_product). `date` fields are stored as epoch millis; `date_nanos` as epoch nanos. kNN search uses `KnnFloatVectorQuery` for `dense_vector` and `KnnByteVectorQuery` for `byte_vector`, both with optional pre-filter.
 
-Custom Lucene Analyzers can be loaded via `AnalyzerRegistry`: built-in names (`standard`, `keyword`, `whitespace`, `simple`, `stop`, `english`), alias names (`ik_max_word`, `ik_smart`, `pinyin`), or `class:<fully-qualified-name>`.
+Custom Lucene Analyzers can be loaded via `AnalyzerRegistry`: built-in names (`standard`, `keyword`, `whitespace`, `simple`, `stop`, `english`), alias names (`ik_max_word`, `ik_smart`, `pinyin`), or `class:<fully-qualified-name>`. The `--analyzer-plugin-path` option adds a directory or jar to the classpath for third-party Analyzer plugins.
 
 ### ILM (Index Lifecycle Management)
 
-Two active phases, executed in `ClusterMaintenanceService.tick()`:
+Two active phases, executed in `ClusterMaintenanceService.run(MaintenanceTask.LIFECYCLE)`:
 
 - **`warm`:** Runs on every node for shards it owns. Executes `forceMerge(1)` on the local IndexWriter, then commits. Deduplicated per `(shardId, ownerTerm, allocationEpoch)` tuple so each ownership epoch triggers at most one force-merge.
-- **`delete`:** Master-only. Removes index from cluster state, deletes local shard data, S3 objects, and manifest metadata.
+- **`delete`:** Master-only. Marks the index as `deletePending`, removes it from cluster state, deletes local shard data, S3 objects, and manifest metadata. Indices with `deletePending=true` are skipped by all other maintenance tasks (upload retry, snapshot GC, warm lifecycle).
 
 `hot`, `cold`, and `frozen` phases are accepted in policy configuration but trigger no action.
+
+### Maintenance & Shard Scoping
+
+`ClusterMaintenanceService` dispatches background work via a `MaintenanceTask` enum: `WRITE_MAINTENANCE`, `UPLOAD_RETRY`, `SNAPSHOT_GC`, `LIFECYCLE`, and `CACHE_CLEANUP`. `HttpApiServer.maintenanceTick()` runs these sequentially, gated by `maintenanceRunning` to prevent concurrent ticks.
+
+Shard-level operations (upload retry, snapshot GC, force-merge) acquire a `shardScope` via `tryAcquireShardScope(shardId)`. This prevents concurrent maintenance tasks from operating on the same shard simultaneously — e.g., an upload retry and a warm-phase force-merge racing on the same IndexWriter.
 
 ### PIT & Snapshot GC
 
 Opening a PIT pins the current snapshot generation per shard. Pinned files are protected from garbage collection. PIT queries use a fixed `remoteSnapshotGeneration` in `S3CachingDirectory` to ensure stable results. Expired PITs are cleaned up on the maintenance tick; the master runs periodic snapshot GC, retaining the latest `--snapshot-retain-latest` generations plus any pinned generations.
+
+### Server Refactoring
+
+`HttpApiServer` delegates cluster introspection (cluster state, health, shards, nodes, upload status, indices) to `ClusterIntrospectionHandlers`, reducing the size of `HttpApiServer` and isolating read-only inspection logic from read/write coordination logic.
 
 ### Observability
 

@@ -50,11 +50,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 import static com.github.wxk6b1203.http.HttpApiRequestParsing.*;
@@ -86,12 +82,16 @@ public class HttpApiServer implements AutoCloseable {
     private final ManifestMetadataManager manifestMetadataManager;
     private final RemoteObjectStore remoteObjectStore;
     private final ClusterMaintenanceService maintenanceService;
+    private final ClusterIntrospectionHandlers clusterHandlers;
     private final ServerMetrics serverMetrics;
     private final Duration forwardTimeout;
+    private final long writeMaintenanceIntervalMillis;
+    private final boolean weakRemoteSnapshotReadsEnabled;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
     private final Set<String> maintenanceTasksRunning = ConcurrentHashMap.newKeySet();
     private final ExecutorService maintenanceExecutor;
     private Long maintenanceTimerId;
+    private Long writeMaintenanceTimerId;
     private S3Client s3Client;
     private HttpServer httpServer;
 
@@ -182,6 +182,15 @@ public class HttpApiServer implements AutoCloseable {
                 : new MemMockProvider();
         Path dataPath = Path.of(options.dataPath());
         this.remoteObjectStore = remoteObjectStore(options, dataPath);
+        IndexWriteOptions writeOptions = new IndexWriteOptions(
+                options.commitEveryRequest(),
+                options.commitAfterDocs(),
+                Duration.ofMillis(options.commitIntervalMillis()),
+                IndexWriteOptions.RefreshPolicy.parse(options.refreshPolicy()),
+                Duration.ofMillis(options.refreshIntervalMillis())
+        );
+        this.writeMaintenanceIntervalMillis = writeMaintenanceIntervalMillis(writeOptions);
+        this.weakRemoteSnapshotReadsEnabled = writeOptions.commitEveryRequest();
         this.localShardIndexService = new LuceneLocalShardIndexService(
                 dataPath,
                 options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
@@ -192,7 +201,8 @@ public class HttpApiServer implements AutoCloseable {
                         UploadWaitStrategy.parse(options.uploadWaitStrategy()),
                         Duration.ofSeconds(options.uploadWaitTimeoutSeconds())
                 ),
-                options.analyzerPluginPath() == null ? null : Path.of(options.analyzerPluginPath())
+                options.analyzerPluginPath() == null ? null : Path.of(options.analyzerPluginPath()),
+                writeOptions
         );
         this.maintenanceService = new ClusterMaintenanceService(
                 clusterStateRepository,
@@ -205,6 +215,15 @@ public class HttpApiServer implements AutoCloseable {
                 this::deleteIndexAndData,
                 new LocalCacheManager(dataPath, options.cacheMaxBytes(), Duration.ofHours(1)),
                 Duration.ofSeconds(options.cacheCleanupIntervalSeconds())
+        );
+        this.clusterHandlers = new ClusterIntrospectionHandlers(
+                clusterStateRepository,
+                maintenanceService,
+                localNode,
+                localShardIndexService,
+                manifestMetadataManager,
+                serverMetrics,
+                pits::size
         );
     }
 
@@ -255,6 +274,17 @@ public class HttpApiServer implements AutoCloseable {
 
     private boolean isAliyunOssEndpoint(String endpoint) {
         return endpoint != null && endpoint.toLowerCase(Locale.ROOT).contains("aliyuncs.com");
+    }
+
+    static long writeMaintenanceIntervalMillis(IndexWriteOptions options) {
+        long interval = Long.MAX_VALUE;
+        if (!options.commitEveryRequest() && !options.commitInterval().isZero()) {
+            interval = Math.min(interval, options.commitInterval().toMillis());
+        }
+        if (options.refreshPolicy() == IndexWriteOptions.RefreshPolicy.INTERVAL) {
+            interval = Math.min(interval, options.refreshInterval().toMillis());
+        }
+        return interval == Long.MAX_VALUE ? 0 : Math.max(1, interval);
     }
 
     private void recordMetrics(RoutingContext context) {
@@ -323,22 +353,22 @@ public class HttpApiServer implements AutoCloseable {
         router.post("/_internal/:index/:shard/_bulk").blockingHandler(this::internalShardBulk, false);
         router.post("/_internal/:index/:shard/_delete_by_query").blockingHandler(this::internalShardDeleteByQuery, false);
         router.post("/_internal/:index/:shard/_update_by_query").blockingHandler(this::internalShardUpdateByQuery, false);
-        router.get("/_cluster/state").blockingHandler(this::clusterState, false);
-        router.get("/_cluster/health").blockingHandler(this::clusterHealth, false);
-        router.get("/_nodes").blockingHandler(this::nodes, false);
-        router.get("/_nodes/stats").blockingHandler(this::nodeStats, false);
-        router.get("/_shards").blockingHandler(this::shards, false);
-        router.get("/_indices").blockingHandler(this::indices, false);
-        router.get("/_snapshot_status").blockingHandler(this::snapshotStatus, false);
-        router.get("/_uploads").blockingHandler(this::uploadStatus, false);
-        router.post("/_uploads/_retry").blockingHandler(this::retryUploads, false);
+        router.get("/_cluster/state").blockingHandler(clusterHandlers::clusterState, false);
+        router.get("/_cluster/health").blockingHandler(clusterHandlers::clusterHealth, false);
+        router.get("/_nodes").blockingHandler(clusterHandlers::nodes, false);
+        router.get("/_nodes/stats").blockingHandler(clusterHandlers::nodeStats, false);
+        router.get("/_shards").blockingHandler(clusterHandlers::shards, false);
+        router.get("/_indices").blockingHandler(clusterHandlers::indices, false);
+        router.get("/_snapshot_status").blockingHandler(clusterHandlers::snapshotStatus, false);
+        router.get("/_uploads").blockingHandler(clusterHandlers::uploadStatus, false);
+        router.post("/_uploads/_retry").blockingHandler(clusterHandlers::retryUploads, false);
         router.post("/_bulk").blockingHandler(this::bulk, false);
         router.delete("/_pit").blockingHandler(this::closePointInTime, false);
         router.put("/:index").blockingHandler(this::createIndex, false);
         router.delete("/:index").blockingHandler(this::deleteIndex, false);
         router.get("/:index").blockingHandler(this::getIndex, false);
-        router.get("/:index/_uploads").blockingHandler(this::uploadStatus, false);
-        router.post("/:index/_uploads/_retry").blockingHandler(this::retryUploads, false);
+        router.get("/:index/_uploads").blockingHandler(clusterHandlers::uploadStatus, false);
+        router.post("/:index/_uploads/_retry").blockingHandler(clusterHandlers::retryUploads, false);
         router.get("/:index/_mapping").blockingHandler(this::getMapping, false);
         router.put("/:index/_mapping").blockingHandler(this::putMapping, false);
         router.post("/:index/_bulk").blockingHandler(this::bulk, false);
@@ -366,246 +396,14 @@ public class HttpApiServer implements AutoCloseable {
                 .onSuccess(server -> {
                     this.httpServer = server;
                     this.maintenanceTimerId = vertx.setPeriodic(1_000, ignored -> maintenanceTick());
+                    if (writeMaintenanceIntervalMillis > 0) {
+                        this.writeMaintenanceTimerId = vertx.setPeriodic(
+                                writeMaintenanceIntervalMillis,
+                                ignored -> writeMaintenanceTick()
+                        );
+                    }
                     log.info("HTTP API listening on {}", port);
                 });
-    }
-
-    private void clusterState(RoutingContext context) {
-        try {
-            json(context, 200, clusterStateRepository.current());
-        } catch (IOException e) {
-            error(context, 500, e);
-        }
-    }
-
-    private void nodes(RoutingContext context) {
-        try {
-            json(context, 200, clusterStateRepository.current().nodes());
-        } catch (IOException e) {
-            error(context, 500, e);
-        }
-    }
-
-    private void clusterHealth(RoutingContext context) {
-        try {
-            ClusterState state = clusterStateRepository.current();
-            Map<String, Object> uploads = maintenanceService.uploadStatus(null);
-            Map<String, Object> summary = mapValue(uploads.get("summary"));
-            long pendingUploads = longValue(summary.get("pending_shards"), 0);
-            long stuckUploads = longValue(summary.get("stuck_shards"), 0);
-            long activeShards = state.routingTable().stream()
-                    .filter(routing -> routing.state() == ShardState.STARTED)
-                    .count();
-            long unassignedShards = state.routingTable().stream()
-                    .filter(routing -> routing.state() != ShardState.STARTED
-                            || !state.nodes().containsKey(routing.nodeId()))
-                    .count();
-            String status = "green";
-            if (state.masterNodeId() == null || unassignedShards > 0) {
-                status = "red";
-            } else if (pendingUploads > 0 || stuckUploads > 0) {
-                status = "yellow";
-            }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("cluster_name", state.clusterName());
-            response.put("status", status);
-            response.put("timed_out", false);
-            response.put("master_node", state.masterNodeId());
-            response.put("number_of_nodes", state.nodes().size());
-            response.put("active_shards", activeShards);
-            response.put("unassigned_shards", unassignedShards);
-            response.put("pending_upload_shards", pendingUploads);
-            response.put("stuck_upload_shards", stuckUploads);
-            response.put("cluster_state_version", state.version());
-            serverMetrics.setClusterHealth(activeShards, unassignedShards, pendingUploads, stuckUploads);
-            json(context, 200, response);
-        } catch (Exception e) {
-            error(context, status(e), e);
-        }
-    }
-
-    private void shards(RoutingContext context) {
-        try {
-            ClusterState state = clusterStateRepository.current();
-            List<Map<String, Object>> shards = state.routingTable().stream()
-                    .sorted(java.util.Comparator
-                            .comparing((ShardRouting routing) -> routing.shardId().indexName())
-                            .thenComparingInt(routing -> routing.shardId().shardNumber()))
-                    .map(routing -> shardStats(state, routing))
-                    .toList();
-            json(context, 200, Map.of(
-                    "cluster_state_version", state.version(),
-                    "shards", shards
-            ));
-        } catch (Exception e) {
-            error(context, status(e), e);
-        }
-    }
-
-    private void indices(RoutingContext context) {
-        try {
-            ClusterState state = clusterStateRepository.current();
-            List<Map<String, Object>> indices = state.indices().entrySet().stream()
-                    .sorted(Map.Entry.comparingByKey())
-                    .map(entry -> indexStats(state, entry.getKey(), entry.getValue(), false))
-                    .toList();
-            json(context, 200, Map.of(
-                    "cluster_state_version", state.version(),
-                    "indices", indices
-            ));
-        } catch (Exception e) {
-            error(context, status(e), e);
-        }
-    }
-
-    private void snapshotStatus(RoutingContext context) {
-        try {
-            json(context, 200, maintenanceService.uploadStatus(context.queryParams().get("index")));
-        } catch (Exception e) {
-            error(context, status(e), e);
-        }
-    }
-
-    private void nodeStats(RoutingContext context) {
-        try {
-            ClusterState state = clusterStateRepository.current();
-            Map<String, Object> localStats = new LinkedHashMap<>();
-            localStats.put("name", localNode.name());
-            localStats.put("host", localNode.host());
-            localStats.put("http_port", localNode.httpPort());
-            localStats.put("roles", localNode.roles());
-            localStats.put("coordinating_pits", pits.size());
-            localStats.put("local_pits", localShardIndexService.openPointInTimeCount());
-            Map<String, Object> cacheStats = RemoteCacheStats.snapshot();
-            Map<String, Object> s3Stats = S3RemoteObjectStore.statsSnapshot();
-            localStats.put("cache", cacheStats);
-            localStats.put("cache_cleanup", maintenanceService.cacheStatus());
-            localStats.put("s3", s3Stats);
-            localStats.put("metrics_port", serverMetrics.metricsPort());
-            localStats.put("cluster_state_version", state.version());
-            serverMetrics.setPitCounts(pits.size(), localShardIndexService.openPointInTimeCount());
-            serverMetrics.setCacheStats(cacheStats);
-            serverMetrics.setS3Stats(s3Stats);
-            Map<String, Object> nodes = new LinkedHashMap<>();
-            nodes.put(localNode.id(), localStats);
-            json(context, 200, Map.of("nodes", nodes));
-        } catch (Exception e) {
-            error(context, status(e), e);
-        }
-    }
-
-    private Map<String, Object> shardStats(ClusterState state, ShardRouting routing) {
-        ShardId shardId = routing.shardId();
-        ClusterNode owner = state.nodes().get(routing.nodeId());
-        IndexCommitSnapshot snapshot = latestRemoteSnapshot(shardId);
-        String physicalIndexName = physicalIndexName(shardId);
-        long pendingUploads = pendingUploadCount(physicalIndexName);
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("index", shardId.indexName());
-        result.put("shard", shardId.shardNumber());
-        result.put("physical_index", physicalIndexName);
-        result.put("state", routing.state());
-        result.put("owner_node", routing.nodeId());
-        result.put("owner_live", owner != null);
-        result.put("owner_term", routing.ownerTerm());
-        result.put("allocation_epoch", routing.allocationEpoch());
-        result.put("latest_snapshot_generation", snapshot == null ? null : snapshot.getGeneration());
-        result.put("latest_snapshot_segment", snapshot == null ? null : snapshot.getSegmentFileName());
-        result.put("remote_snapshot_ready", remoteSnapshotReady(shardId, snapshot));
-        result.put("pending_uploads", pendingUploads);
-        return result;
-    }
-
-    private Map<String, Object> indexStats(
-            ClusterState state,
-            String indexName,
-            IndexSettings settings,
-            boolean includeMappings
-    ) {
-        List<ShardRouting> routings = state.routingTable().stream()
-                .filter(routing -> routing.shardId().indexName().equals(indexName))
-                .sorted(Comparator.comparingInt(routing -> routing.shardId().shardNumber()))
-                .toList();
-        long started = 0;
-        long ownerUnavailable = 0;
-        long remoteSnapshotReady = 0;
-        long pendingUploads = 0;
-        for (ShardRouting routing : routings) {
-            if (routing.state() == ShardState.STARTED) {
-                started++;
-            }
-            if (routing.state() == ShardState.STARTED
-                    && (routing.nodeId() == null || !state.nodes().containsKey(routing.nodeId()))) {
-                ownerUnavailable++;
-            }
-            ShardId shardId = routing.shardId();
-            IndexCommitSnapshot snapshot = latestRemoteSnapshot(shardId);
-            if (remoteSnapshotReady(shardId, snapshot)) {
-                remoteSnapshotReady++;
-            }
-            pendingUploads += pendingUploadCount(physicalIndexName(shardId));
-        }
-        long missingRouting = Math.max(0, settings.numberOfShards() - routings.size());
-        long unassigned = routings.size() - started + missingRouting;
-        boolean routingMismatch = routings.size() != settings.numberOfShards();
-        String status = "green";
-        if (settings.deletePending() || routingMismatch || unassigned > 0 || ownerUnavailable > 0) {
-            status = "red";
-        } else if (pendingUploads > 0) {
-            status = "yellow";
-        }
-
-        Map<String, Object> shardSummary = new LinkedHashMap<>();
-        shardSummary.put("total", settings.numberOfShards());
-        shardSummary.put("routing_entries", routings.size());
-        shardSummary.put("routing_mismatch", routingMismatch);
-        shardSummary.put("started", started);
-        shardSummary.put("unassigned", unassigned);
-        shardSummary.put("owner_unavailable", ownerUnavailable);
-        shardSummary.put("remote_snapshot_ready", remoteSnapshotReady);
-        shardSummary.put("pending_uploads", pendingUploads);
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("name", indexName);
-        result.put("status", status);
-        result.put("number_of_shards", settings.numberOfShards());
-        result.put("lifecycle_policy", settings.lifecyclePolicy());
-        result.put("created_at", settings.createdAt());
-        result.put("delete_pending", settings.deletePending());
-        result.put("delete_started_at", settings.deleteStartedAt());
-        result.put("mapping_fields", settings.mappings().size());
-        result.put("shards", shardSummary);
-        if (includeMappings) {
-            result.put("mappings", Map.of("properties", settings.mappings()));
-        }
-        return result;
-    }
-
-    private long pendingUploadCount(String physicalIndexName) {
-        return manifestMetadataManager.listAll(physicalIndexName, List.of(
-                        IndexFileStatus.DIRTY,
-                        IndexFileStatus.UPLOADING
-                ))
-                .stream()
-                .filter(metadata -> metadata.getStatus() == IndexFileStatus.DIRTY
-                        || metadata.getStatus() == IndexFileStatus.UPLOADING)
-                .count();
-    }
-
-    private void uploadStatus(RoutingContext context) {
-        try {
-            json(context, 200, maintenanceService.uploadStatus(context.pathParam("index")));
-        } catch (Exception e) {
-            error(context, status(e), e);
-        }
-    }
-
-    private void retryUploads(RoutingContext context) {
-        try {
-            json(context, 200, maintenanceService.retryPendingUploadsNow(context.pathParam("index")));
-        } catch (Exception e) {
-            error(context, status(e), e);
-        }
     }
 
     private void createIndex(RoutingContext context) {
@@ -698,8 +496,8 @@ public class HttpApiServer implements AutoCloseable {
             if (settings == null) {
                 throw new IllegalArgumentException("index not found: " + index);
             }
-            ClusterState state = deleteIndexAndData(index, settings.numberOfShards());
-            json(context, 200, state);
+            maintenanceService.deleteIndexDataWithScope(index, settings.numberOfShards());
+            json(context, 200, clusterStateRepository.current());
         } catch (Exception e) {
             error(context, status(e), e);
         }
@@ -713,7 +511,7 @@ public class HttpApiServer implements AutoCloseable {
             if (settings == null) {
                 throw new IllegalArgumentException("index not found: " + index);
             }
-            json(context, 200, Map.of(index, indexStats(state, index, settings, true)));
+            json(context, 200, Map.of(index, clusterHandlers.indexStats(state, index, settings, true)));
         } catch (Exception e) {
             error(context, status(e), e);
         }
@@ -1231,7 +1029,8 @@ public class HttpApiServer implements AutoCloseable {
     ) {
         ShardRouting routing = routingFor(base.shardId(), state);
         IndexCommitSnapshot snapshot = latestRemoteSnapshot(base.shardId());
-        if (consistency.equalsIgnoreCase("strong") || remoteSnapshotReady(base.shardId(), snapshot)) {
+        if (consistency.equalsIgnoreCase("strong")
+                || (weakRemoteSnapshotReadsEnabled && remoteSnapshotReady(base.shardId(), snapshot))) {
             ClusterNode node = leastLoaded(dataNodes, load);
             load.merge(node.id(), 1, Integer::sum);
             return new SearchShardTarget(
@@ -2306,9 +2105,19 @@ public class HttpApiServer implements AutoCloseable {
     private void maintenanceTick() {
         submitMaintenanceTask("pit-cleanup", this::cleanupExpiredPits);
         for (ClusterMaintenanceService.MaintenanceTask task : ClusterMaintenanceService.MaintenanceTask.values()) {
+            if (task == ClusterMaintenanceService.MaintenanceTask.WRITE_MAINTENANCE) {
+                continue;
+            }
             submitMaintenanceTask(task.name(), () -> maintenanceService.run(task));
         }
         submitMaintenanceTask("metrics-refresh", this::refreshRuntimeMetrics);
+    }
+
+    private void writeMaintenanceTick() {
+        submitMaintenanceTask(
+                ClusterMaintenanceService.MaintenanceTask.WRITE_MAINTENANCE.name(),
+                () -> maintenanceService.run(ClusterMaintenanceService.MaintenanceTask.WRITE_MAINTENANCE)
+        );
     }
 
     private void submitMaintenanceTask(String name, Runnable task) {
@@ -2647,6 +2456,9 @@ public class HttpApiServer implements AutoCloseable {
     public void close() {
         if (maintenanceTimerId != null) {
             vertx.cancelTimer(maintenanceTimerId);
+        }
+        if (writeMaintenanceTimerId != null) {
+            vertx.cancelTimer(writeMaintenanceTimerId);
         }
         if (httpServer != null) {
             try {

@@ -3,6 +3,7 @@ package com.github.wxk6b1203.http;
 import com.github.wxk6b1203.cluster.FieldMapping;
 import com.github.wxk6b1203.cluster.NodeRole;
 import com.github.wxk6b1203.config.ServerOptions;
+import com.github.wxk6b1203.index.IndexWriteOptions;
 import com.github.wxk6b1203.search.SearchRequest;
 import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.util.JsonUtil;
@@ -37,6 +38,25 @@ class HttpApiServerTest {
 
     private HttpApiServer server;
     private int port;
+
+    @Test
+    void writeMaintenanceIntervalUsesConfiguredSubSecondCadence() {
+        assertEquals(100, HttpApiServer.writeMaintenanceIntervalMillis(new IndexWriteOptions(
+                false,
+                0,
+                Duration.ofMillis(100),
+                IndexWriteOptions.RefreshPolicy.IMMEDIATE,
+                Duration.ofSeconds(1)
+        )));
+        assertEquals(50, HttpApiServer.writeMaintenanceIntervalMillis(new IndexWriteOptions(
+                false,
+                0,
+                Duration.ofMillis(500),
+                IndexWriteOptions.RefreshPolicy.INTERVAL,
+                Duration.ofMillis(50)
+        )));
+        assertEquals(0, HttpApiServer.writeMaintenanceIntervalMillis(IndexWriteOptions.defaults()));
+    }
 
     @AfterEach
     void closeServer() {
@@ -694,6 +714,36 @@ class HttpApiServerTest {
         assertEquals(List.of("doc-1"), hitIds(response));
     }
 
+    @Test
+    @Timeout(60)
+    @SuppressWarnings("unchecked")
+    void weakSearchUsesLocalOwnerWhenCommitsAreDeferred() throws Exception {
+        startServer(2, "wait_for_upload", false, 60_000, 2, "immediate");
+        createBooksIndex();
+        indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
+        indexBook("doc-2", "visible", 200, List.of(0.0, 1.0));
+
+        Map<String, Object> committedPlan = post("/books/_search_plan", Map.of(
+                "query", Map.of("match_all", Map.of())
+        ), 200);
+        List<Map<String, Object>> committedTargets = (List<Map<String, Object>>) committedPlan.get("targets");
+        assertTrue(committedTargets.stream().noneMatch(target -> Boolean.TRUE.equals(target.get("remoteSnapshot"))));
+
+        indexBook("doc-3", "fresh", 300, List.of(1.0, 1.0));
+
+        Map<String, Object> weakSearch = post("/books/_search", Map.of(
+                "query", Map.of("term", Map.of("category", "fresh")),
+                "size", 10
+        ), 200);
+        assertEquals(List.of("doc-3"), hitIds(weakSearch));
+
+        Map<String, Object> strongSearch = post("/books/_search?read_preference=strong", Map.of(
+                "query", Map.of("term", Map.of("category", "fresh")),
+                "size", 10
+        ), 200);
+        assertTrue(hitIds(strongSearch).isEmpty());
+    }
+
     private void startServer() throws Exception {
         startServer(2);
     }
@@ -703,6 +753,17 @@ class HttpApiServerTest {
     }
 
     private void startServer(int snapshotRetainLatest, String uploadWaitStrategy) throws Exception {
+        startServer(snapshotRetainLatest, uploadWaitStrategy, true, 0, 0, "immediate");
+    }
+
+    private void startServer(
+            int snapshotRetainLatest,
+            String uploadWaitStrategy,
+            boolean commitEveryRequest,
+            int commitIntervalMillis,
+            int commitAfterDocs,
+            String refreshPolicy
+    ) throws Exception {
         port = freePort();
         server = new HttpApiServer(new ServerOptions(
                 port,
@@ -727,6 +788,11 @@ class HttpApiServerTest {
                 10,
                 uploadWaitStrategy,
                 5,
+                commitEveryRequest,
+                commitIntervalMillis,
+                commitAfterDocs,
+                refreshPolicy,
+                1000,
                 null,
                 0,
                 60,

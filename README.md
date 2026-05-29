@@ -220,7 +220,12 @@ Windows 使用：
 | `--s3-content-md5` | `false` | 是否启用 legacy `Content-MD5` header。阿里云 OSS 等 S3 兼容服务如果要求 `DeleteObjects` 带 `Content-MD5`，可打开该选项。 |
 | `--s3-access-key` | 空 | S3 access key。未指定时走 AWS SDK 默认凭证链。 |
 | `--s3-secret-key` | 空 | S3 secret key。未指定时走 AWS SDK 默认凭证链。 |
-| `--upload-wait-strategy` | `async` | 写入提交后的远端上传等待策略。`async` 表示 Lucene 本地 commit 后返回；`wait_for_upload` 表示等待本次 commit 文件上传并发布 clean snapshot 后返回。 |
+| `--commit-every-request` | `true` | 是否每次成功写请求都执行 Lucene commit 并触发远端发布。压测写入时可设为 `false`，改由文档数或时间阈值触发。 |
+| `--commit-interval` | `1000` | 关闭每请求 commit 后的延迟 commit 周期，单位毫秒；仅在 `--commit-every-request=false` 且未达到文档数阈值时生效。 |
+| `--commit-after-docs` | `0` | 关闭每请求 commit 后，累计多少个变更文档触发一次 commit。`0` 表示不按文档数触发。 |
+| `--refresh-policy` | `immediate` | 本地弱读 searcher refresh 策略。`immediate` 表示写请求返回前 refresh；`interval` 表示由后台维护按 `--refresh-interval` refresh。 |
+| `--refresh-interval` | `1000` | `refresh-policy=interval` 时的本地 searcher refresh 周期，单位毫秒。refresh 只影响本地可搜索性，不等同于 Lucene commit 或远端 snapshot 发布。 |
+| `--upload-wait-strategy` | `async` | Lucene commit 后的远端上传等待策略。`async` 表示本地 commit 后返回；`wait_for_upload` 表示等待本次 commit 文件上传并发布 clean snapshot 后返回。若关闭每请求 commit，上传等待只会发生在实际 commit 触发时。 |
 | `--upload-wait-timeout` | `30` | `wait_for_upload` 等待上传和 snapshot 发布的超时时间，单位秒。 |
 | `--snapshot-retain-latest` | `2` | 每个 shard 至少保留的最新 commit snapshot generation 数。PIT pin 住的 generation 会额外保留。 |
 
@@ -249,6 +254,14 @@ server:
   cache:
     maxBytes: 10737418240
     cleanupIntervalSeconds: 60
+  index:
+    commit:
+      everyRequest: true
+      intervalMillis: 1000
+      afterDocs: 0
+    refresh:
+      policy: immediate
+      intervalMillis: 1000
   analyzer:
     pluginPath: plugins/analyzers
   upload:

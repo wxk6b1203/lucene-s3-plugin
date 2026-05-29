@@ -213,6 +213,43 @@ public class LuceneLocalShardIndexServiceTest {
     }
 
     @Test
+    public void deferredCommitRefreshesLocallyBeforeRemotePublish() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        IndexWriteOptions writeOptions = new IndexWriteOptions(
+                false,
+                2,
+                Duration.ofHours(1),
+                IndexWriteOptions.RefreshPolicy.INTERVAL,
+                Duration.ofMillis(1)
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote")),
+                new com.github.wxk6b1203.store.manifest.ManifestOptions("bucket"),
+                null,
+                writeOptions
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of("title", "deferred")));
+
+            assertEquals(0, matchAll(service, shardId).hits().size());
+            Thread.sleep(5);
+            service.runWriteMaintenance();
+            assertEquals(List.of("doc-1"), matchAll(service, shardId).hits().stream().map(hit -> hit.id()).toList());
+            assertEquals(0, remoteMatchAll(service, shardId).hits().size());
+
+            service.index(new IndexDocumentRequest("books", shardId, "doc-2", Map.of("title", "published")));
+            waitForCleanSnapshot(metadata, "books__shard_0");
+            assertEquals(
+                    List.of("doc-1", "doc-2"),
+                    remoteMatchAll(service, shardId).hits().stream().map(hit -> hit.id()).sorted().toList()
+            );
+        }
+    }
+
+    @Test
     public void testNewOwnerWritesFromLastCleanSnapshotWhenPreviousOwnerHasUnuploadedCommit() throws Exception {
         MemMockProvider metadata = new MemMockProvider();
         ShardId shardId = new ShardId("books", 0);
@@ -1304,6 +1341,39 @@ public class LuceneLocalShardIndexServiceTest {
             Thread.sleep(50);
         }
         throw new AssertionError("segments file was not marked CLEAN");
+    }
+
+    private com.github.wxk6b1203.search.SearchResponse matchAll(
+            LuceneLocalShardIndexService service,
+            ShardId shardId
+    ) throws IOException {
+        return service.search(
+                shardId,
+                new SearchRequest("books", Map.of("match_all", Map.of()), List.of(), null, null, 0, 10)
+        );
+    }
+
+    private com.github.wxk6b1203.search.SearchResponse remoteMatchAll(
+            LuceneLocalShardIndexService service,
+            ShardId shardId
+    ) throws IOException {
+        return service.search(
+                shardId,
+                new SearchRequest(
+                        "books",
+                        Map.of("match_all", Map.of()),
+                        List.of(),
+                        null,
+                        null,
+                        0,
+                        10,
+                        List.of(),
+                        List.of(),
+                        null,
+                        Map.of(),
+                        "remote"
+                )
+        );
     }
 
     private void waitForCleanSnapshot(MemMockProvider metadata, String physicalIndexName) throws InterruptedException {

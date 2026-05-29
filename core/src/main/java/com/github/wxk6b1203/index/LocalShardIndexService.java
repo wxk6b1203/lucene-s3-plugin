@@ -1,11 +1,7 @@
 package com.github.wxk6b1203.index;
 
 import com.github.wxk6b1203.cluster.ShardId;
-import com.github.wxk6b1203.search.ByQueryRequest;
-import com.github.wxk6b1203.search.ByQueryResponse;
-import com.github.wxk6b1203.search.PointInTimeResponse;
-import com.github.wxk6b1203.search.SearchRequest;
-import com.github.wxk6b1203.search.SearchResponse;
+import com.github.wxk6b1203.search.*;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -58,6 +54,21 @@ public interface LocalShardIndexService extends AutoCloseable {
     void deleteIndex(String indexName, int numberOfShards) throws IOException;
 
     void retryPendingUploads(Collection<ShardId> shardIds) throws IOException;
+
+    default Collection<ShardId> shardIdsWithPendingWrites() throws IOException {
+        return List.of();
+    }
+
+    default Collection<ShardId> shardIdsWithPendingUploads() throws IOException {
+        return List.of();
+    }
+
+    default void runWriteMaintenance() throws IOException {
+    }
+
+    default void runWriteMaintenance(Collection<ShardId> shardIds) throws IOException {
+        runWriteMaintenance();
+    }
 
     default int openPointInTimeCount() {
         return 0;
