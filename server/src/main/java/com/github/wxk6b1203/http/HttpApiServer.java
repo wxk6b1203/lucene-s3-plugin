@@ -86,6 +86,7 @@ public class HttpApiServer implements AutoCloseable {
     private final ServerMetrics serverMetrics;
     private final Duration forwardTimeout;
     private final long writeMaintenanceIntervalMillis;
+    private final boolean weakRemoteSnapshotReadsEnabled;
     private final Map<String, CoordinatingPit> pits = new ConcurrentHashMap<>();
     private final Set<String> maintenanceTasksRunning = ConcurrentHashMap.newKeySet();
     private final ExecutorService maintenanceExecutor;
@@ -189,6 +190,7 @@ public class HttpApiServer implements AutoCloseable {
                 Duration.ofMillis(options.refreshIntervalMillis())
         );
         this.writeMaintenanceIntervalMillis = writeMaintenanceIntervalMillis(writeOptions);
+        this.weakRemoteSnapshotReadsEnabled = writeOptions.commitEveryRequest();
         this.localShardIndexService = new LuceneLocalShardIndexService(
                 dataPath,
                 options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
@@ -1027,7 +1029,8 @@ public class HttpApiServer implements AutoCloseable {
     ) {
         ShardRouting routing = routingFor(base.shardId(), state);
         IndexCommitSnapshot snapshot = latestRemoteSnapshot(base.shardId());
-        if (consistency.equalsIgnoreCase("strong") || remoteSnapshotReady(base.shardId(), snapshot)) {
+        if (consistency.equalsIgnoreCase("strong")
+                || (weakRemoteSnapshotReadsEnabled && remoteSnapshotReady(base.shardId(), snapshot))) {
             ClusterNode node = leastLoaded(dataNodes, load);
             load.merge(node.id(), 1, Integer::sum);
             return new SearchShardTarget(
