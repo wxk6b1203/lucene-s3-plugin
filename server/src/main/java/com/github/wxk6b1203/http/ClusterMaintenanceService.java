@@ -244,16 +244,31 @@ final class ClusterMaintenanceService {
                 shardIds.add(shardId);
             }
         }
+        IOException failure = null;
         for (ShardId shardId : shardIds) {
             if (!tryAcquireShardScope(shardId)) {
                 continue;
             }
             try {
                 localShardIndexService.retryPendingUploads(List.of(shardId));
+            } catch (IOException e) {
+                log.warn("failed to retry pending uploads for {}", shardId.routeKey(), e);
+                failure = addFailure(failure, e);
             } finally {
                 releaseShardScope(shardId);
             }
         }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private static IOException addFailure(IOException failure, IOException e) {
+        if (failure == null) {
+            return e;
+        }
+        failure.addSuppressed(e);
+        return failure;
     }
 
     private Map<String, Object> uploadStatus(ClusterState state, String indexFilter) {

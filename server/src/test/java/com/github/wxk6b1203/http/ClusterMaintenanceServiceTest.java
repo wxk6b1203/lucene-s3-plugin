@@ -23,6 +23,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClusterMaintenanceServiceTest {
@@ -189,6 +190,42 @@ class ClusterMaintenanceServiceTest {
     }
 
     @Test
+    void uploadRetryContinuesAfterOneShardFails() {
+        ClusterNode node = new ClusterNode(
+                "node-1",
+                "node-1",
+                "127.0.0.1",
+                9200,
+                Set.of(NodeRole.MASTER, NodeRole.DATA),
+                Instant.now()
+        );
+        ShardId shard0 = new ShardId("books", 0);
+        ShardId shard1 = new ShardId("books", 1);
+        ClusterState state = new ClusterState(
+                "test",
+                1,
+                node.id(),
+                Map.of(node.id(), node),
+                Map.of("books", new IndexSettings("books", 2, null, Instant.now())),
+                List.of(
+                        new ShardRouting(shard0, ShardState.STARTED, node.id(), 1, 1),
+                        new ShardRouting(shard1, ShardState.STARTED, node.id(), 1, 1)
+                ),
+                Map.of(),
+                Instant.now()
+        );
+        BlockingShardService localShardService = new BlockingShardService();
+        localShardService.releaseRetry.countDown();
+        localShardService.failedRetryShardIds = Set.of(shard0);
+        ClusterMaintenanceService service = newService(node, state, localShardService, (index, shards) -> {
+        });
+
+        assertThrows(IOException.class, () -> service.retryPendingUploadsNow(null));
+
+        assertEquals(List.of(shard0, shard1), localShardService.retryAttempts);
+    }
+
+    @Test
     @Timeout(10)
     void indexDeleteWaitsForWriteMaintenanceToFinish() throws Exception {
         ClusterNode node = new ClusterNode(
@@ -291,6 +328,8 @@ class ClusterMaintenanceServiceTest {
         private volatile Collection<ShardId> pendingUploadShardIds = List.of();
         private volatile Collection<ShardId> writeMaintenanceShardIds = List.of();
         private volatile Collection<ShardId> retryShardIds = List.of();
+        private volatile Collection<ShardId> failedRetryShardIds = List.of();
+        private final List<ShardId> retryAttempts = new CopyOnWriteArrayList<>();
         private volatile boolean blockWriteMaintenance;
 
         @Override
@@ -340,12 +379,18 @@ class ClusterMaintenanceServiceTest {
         @Override
         public void retryPendingUploads(Collection<ShardId> shardIds) throws IOException {
             retryShardIds = List.copyOf(shardIds);
+            retryAttempts.addAll(shardIds);
             retryStarted.countDown();
             try {
                 releaseRetry.await();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException(e);
+            }
+            for (ShardId shardId : shardIds) {
+                if (failedRetryShardIds.contains(shardId)) {
+                    throw new IOException("retry failed: " + shardId.routeKey());
+                }
             }
         }
 
