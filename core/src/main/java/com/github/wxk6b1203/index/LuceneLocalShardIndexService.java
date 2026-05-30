@@ -248,7 +248,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     @Override
     public SearchResponse search(ShardId shardId, SearchRequest request) throws IOException {
         long started = System.nanoTime();
-        cleanupExpiredRemoteSearchers();
+        cleanupIdleResources();
         PitContext pit = pit(request.pitId(), shardId);
         if (pit != null) {
             if (pit.reader() == null) {
@@ -338,6 +338,11 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
                 }
             }
         });
+    }
+
+    @Override
+    public void cleanupIdleResources() {
+        cleanupExpiredRemoteSearchers();
     }
 
     private void closeRemoteSearchers(ShardId shardId) {

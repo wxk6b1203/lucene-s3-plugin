@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -183,6 +184,30 @@ public class LuceneLocalShardIndexServiceTest {
             assertTrue(weakIds.contains("doc-1"));
             assertTrue(weakIds.contains("doc-2"));
             assertEquals(List.of("doc-1"), remoteIds);
+        }
+    }
+
+    @Test
+    public void cleanupIdleResourcesClosesExpiredRemoteSearchersWithoutNewSearch() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of("title", "clean")));
+            waitForCleanSnapshot(metadata, "books__shard_0");
+
+            assertEquals(List.of("doc-1"), remoteMatchAll(service, shardId).hits().stream().map(hit -> hit.id()).toList());
+            Map<?, ?> remoteSearchers = remoteSearchers(service);
+            assertEquals(1, remoteSearchers.size());
+
+            ageRemoteSearchers(remoteSearchers);
+            service.cleanupIdleResources();
+
+            assertTrue(remoteSearchers.isEmpty());
         }
     }
 
@@ -1374,6 +1399,22 @@ public class LuceneLocalShardIndexServiceTest {
                         "remote"
                 )
         );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<?, ?> remoteSearchers(LuceneLocalShardIndexService service) throws Exception {
+        Field field = LuceneLocalShardIndexService.class.getDeclaredField("remoteSearchers");
+        field.setAccessible(true);
+        return (Map<?, ?>) field.get(service);
+    }
+
+    private void ageRemoteSearchers(Map<?, ?> remoteSearchers) throws Exception {
+        long expiredAccessNanos = System.nanoTime() - Duration.ofMinutes(10).toNanos();
+        for (Object searcher : remoteSearchers.values()) {
+            Field field = searcher.getClass().getDeclaredField("lastAccessNanos");
+            field.setAccessible(true);
+            field.setLong(searcher, expiredAccessNanos);
+        }
     }
 
     private void waitForCleanSnapshot(MemMockProvider metadata, String physicalIndexName) throws InterruptedException {

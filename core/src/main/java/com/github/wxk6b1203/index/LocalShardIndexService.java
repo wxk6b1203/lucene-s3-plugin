@@ -70,6 +70,9 @@ public interface LocalShardIndexService extends AutoCloseable {
         runWriteMaintenance();
     }
 
+    default void cleanupIdleResources() throws IOException {
+    }
+
     default int openPointInTimeCount() {
         return 0;
     }

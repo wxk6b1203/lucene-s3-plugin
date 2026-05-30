@@ -2104,6 +2104,7 @@ public class HttpApiServer implements AutoCloseable {
 
     private void maintenanceTick() {
         submitMaintenanceTask("pit-cleanup", this::cleanupExpiredPits);
+        submitMaintenanceTask("idle-resource-cleanup", this::cleanupIdleResources);
         for (ClusterMaintenanceService.MaintenanceTask task : ClusterMaintenanceService.MaintenanceTask.values()) {
             if (task == ClusterMaintenanceService.MaintenanceTask.WRITE_MAINTENANCE) {
                 continue;
@@ -2176,6 +2177,14 @@ public class HttpApiServer implements AutoCloseable {
                         .onFailure(e -> log.warn("failed to close expired point in time {}", pitId, e));
             }
         });
+    }
+
+    private void cleanupIdleResources() {
+        try {
+            localShardIndexService.cleanupIdleResources();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     void runSnapshotGarbageCollection() {
