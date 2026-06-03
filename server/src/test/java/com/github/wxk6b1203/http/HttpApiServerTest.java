@@ -540,6 +540,34 @@ class HttpApiServerTest {
 
     @Test
     @Timeout(60)
+    void bulkBackpressureRejectsOversizedRequests() throws Exception {
+        startServer(2, "async", true, 0, 0, "immediate", 0, 1, 120);
+        createBooksIndex();
+
+        postRaw("/_bulk", """
+                {"index":{"_index":"books","_id":"doc-1"}}
+                {"category":"bulk","pages":1,"embedding":[1.0,0.0]}
+                {"index":{"_index":"books","_id":"doc-2"}}
+                {"category":"bulk","pages":2,"embedding":[0.0,1.0]}
+                """, 429);
+
+        postRaw("/_bulk", """
+                {"index":{"_index":"books","_id":"doc-3"}}
+                {"category":"bulk","pages":333,"embedding":[1.0,1.0],"description":"this body should exceed the configured bulk byte limit"}
+                """, 429);
+
+        postRaw("/_bulk", """
+                {"index":{"_index":"books","_id":"doc-4"}}
+                {"category":"ok","pages":4,"embedding":[1.0,0.0]}
+                """, 200);
+        Map<String, Object> search = post("/books/_search", Map.of(
+                "query", Map.of("term", Map.of("category", "ok"))
+        ), 200);
+        assertEquals(List.of("doc-4"), hitIds(search));
+    }
+
+    @Test
+    @Timeout(60)
     void httpErrorsUseSpecificStatusCodes() throws Exception {
         startServer();
 
@@ -764,6 +792,21 @@ class HttpApiServerTest {
             int commitAfterDocs,
             String refreshPolicy
     ) throws Exception {
+        startServer(snapshotRetainLatest, uploadWaitStrategy, commitEveryRequest, commitIntervalMillis,
+                commitAfterDocs, refreshPolicy, 0, 0, 0);
+    }
+
+    private void startServer(
+            int snapshotRetainLatest,
+            String uploadWaitStrategy,
+            boolean commitEveryRequest,
+            int commitIntervalMillis,
+            int commitAfterDocs,
+            String refreshPolicy,
+            int maxWriteRequests,
+            int maxBulkItems,
+            long maxBulkBytes
+    ) throws Exception {
         port = freePort();
         server = new HttpApiServer(new ServerOptions(
                 port,
@@ -796,7 +839,10 @@ class HttpApiServerTest {
                 null,
                 0,
                 60,
-                0
+                0,
+                maxWriteRequests,
+                maxBulkItems,
+                maxBulkBytes
         ));
         server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
     }

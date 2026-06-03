@@ -112,6 +112,9 @@ final class SearchResponseMerger {
         if ("terms".equals(type)) {
             Map<String, Long> counts = new HashMap<>();
             String field = stringValue(shards.getFirst().get("field"));
+            int size = intValue(shards.getFirst().get("size"), Integer.MAX_VALUE);
+            long minDocCount = longValue(shards.getFirst().get("min_doc_count"), 1);
+            Map<String, Object> order = mapValue(shards.getFirst().get("order"));
             for (Map<String, Object> shard : shards) {
                 Object bucketsValue = shard.get("buckets");
                 if (bucketsValue instanceof List<?> buckets) {
@@ -127,13 +130,57 @@ final class SearchResponseMerger {
                 }
             }
             List<Map<String, Object>> buckets = counts.entrySet().stream()
-                    .sorted((left, right) -> {
-                        int byCount = Long.compare(right.getValue(), left.getValue());
-                        return byCount != 0 ? byCount : left.getKey().compareTo(right.getKey());
-                    })
+                    .filter(entry -> entry.getValue() >= minDocCount)
+                    .sorted(termsComparator(order))
+                    .limit(size)
                     .map(entry -> Map.<String, Object>of("key", entry.getKey(), "doc_count", entry.getValue()))
                     .toList();
-            return Map.of("type", "terms", "field", field, "buckets", buckets);
+            return Map.of(
+                    "type", "terms",
+                    "field", field,
+                    "size", size,
+                    "min_doc_count", minDocCount,
+                    "order", order.isEmpty() ? Map.of("_count", "desc") : order,
+                    "buckets", buckets
+            );
+        }
+        if ("range".equals(type)) {
+            String field = stringValue(shards.getFirst().get("field"));
+            Map<String, Map<String, Object>> bucketsByKey = new java.util.LinkedHashMap<>();
+            for (Map<String, Object> shard : shards) {
+                Object bucketsValue = shard.get("buckets");
+                if (!(bucketsValue instanceof List<?> buckets)) {
+                    continue;
+                }
+                for (Object bucketValue : buckets) {
+                    if (!(bucketValue instanceof Map<?, ?> bucket)) {
+                        continue;
+                    }
+                    String key = stringValue(bucket.get("key"));
+                    if (key == null) {
+                        continue;
+                    }
+                    Map<String, Object> merged = bucketsByKey.computeIfAbsent(key, ignored -> {
+                        Map<String, Object> created = new HashMap<>();
+                        created.put("key", key);
+                        if (bucket.containsKey("from")) {
+                            created.put("from", bucket.get("from"));
+                        }
+                        if (bucket.containsKey("to")) {
+                            created.put("to", bucket.get("to"));
+                        }
+                        created.put("doc_count", 0L);
+                        return created;
+                    });
+                    merged.put("doc_count", longValue(merged.get("doc_count"), 0)
+                            + longValue(bucket.get("doc_count"), 0));
+                }
+            }
+            return Map.of(
+                    "type", "range",
+                    "field", field,
+                    "buckets", List.copyOf(bucketsByKey.values())
+            );
         }
         String field = stringValue(shards.getFirst().get("field"));
         long count = shards.stream()
@@ -200,5 +247,36 @@ final class SearchResponseMerger {
 
     private static String stringValue(Object value) {
         return value == null ? null : value.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> mapValue(Object value) {
+        return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
+    }
+
+    private static int intValue(Object value, int defaultValue) {
+        return value instanceof Number number ? number.intValue() : defaultValue;
+    }
+
+    private static long longValue(Object value, long defaultValue) {
+        return value instanceof Number number ? number.longValue() : defaultValue;
+    }
+
+    private static java.util.Comparator<Map.Entry<String, Long>> termsComparator(Map<String, Object> order) {
+        if (order.isEmpty()) {
+            return (left, right) -> {
+                int byCount = Long.compare(right.getValue(), left.getValue());
+                return byCount != 0 ? byCount : left.getKey().compareTo(right.getKey());
+            };
+        }
+        String by = order.keySet().iterator().next();
+        boolean desc = !"asc".equalsIgnoreCase(String.valueOf(order.get(by)));
+        java.util.Comparator<Map.Entry<String, Long>> comparator = "_key".equals(by)
+                ? Map.Entry.comparingByKey()
+                : Map.Entry.comparingByValue();
+        if (desc) {
+            comparator = comparator.reversed();
+        }
+        return comparator.thenComparing(Map.Entry::getKey);
     }
 }

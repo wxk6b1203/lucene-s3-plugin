@@ -228,6 +228,9 @@ Windows 使用：
 | `--upload-wait-strategy` | `async` | Lucene commit 后的远端上传等待策略。`async` 表示本地 commit 后返回；`wait_for_upload` 表示等待本次 commit 文件上传并发布 clean snapshot 后返回。若关闭每请求 commit，上传等待只会发生在实际 commit 触发时。 |
 | `--upload-wait-timeout` | `30` | `wait_for_upload` 等待上传和 snapshot 发布的超时时间，单位秒。 |
 | `--snapshot-retain-latest` | `2` | 每个 shard 至少保留的最新 commit snapshot generation 数。PIT pin 住的 generation 会额外保留。 |
+| `--max-write-requests` | `0` | 同一节点允许同时进入写入路径的请求数。`0` 表示不限制，超过限制会返回 `429`。 |
+| `--max-bulk-items` | `0` | 单个 bulk 请求允许的最大 item 数。`0` 表示不限制，超过限制会返回 `429`。 |
+| `--max-bulk-bytes` | `0` | 单个 bulk 请求体最大字节数。`0` 表示不限制，超过限制会返回 `429`。 |
 
 YAML 示例：
 
@@ -254,6 +257,11 @@ server:
   cache:
     maxBytes: 10737418240
     cleanupIntervalSeconds: 60
+  write:
+    maxRequests: 0
+  bulk:
+    maxItems: 0
+    maxBytes: 0
   index:
     commit:
       everyRequest: true
@@ -489,7 +497,25 @@ curl -X POST "http://127.0.0.1:9200/books/_search?read_preference=weak" \
       {"_id": {"order": "asc"}}
     ],
     "aggs": {
-      "by_author": {"terms": {"field": "author", "size": 10}},
+      "by_author": {
+        "terms": {
+          "field": "author",
+          "size": 10,
+          "missing": "__missing__",
+          "min_doc_count": 1,
+          "order": {"_count": "desc"}
+        }
+      },
+      "price_ranges": {
+        "range": {
+          "field": "price",
+          "ranges": [
+            {"key": "cheap", "to": 20},
+            {"key": "normal", "from": 20, "to": 100},
+            {"key": "premium", "from": 100}
+          ]
+        }
+      },
       "avg_price": {"avg": {"field": "price"}}
     }
   }'
@@ -510,11 +536,14 @@ curl -X POST "http://127.0.0.1:9200/books/_search?read_preference=weak" \
 支持的聚合：
 
 - `terms`
+- `range`
 - `min`
 - `max`
 - `sum`
 - `avg`
 - `value_count`
+
+`terms` 支持 `size`、`missing`、`min_doc_count` 和 `order`，其中 `order` 可按 `_count` 或 `_key` 排序。`range` 支持 `ranges` 数组，`from` 为闭区间，`to` 为开区间，可选自定义 `key`。
 
 排序支持 `_score`、`_id` 和开启 doc values 的 mapping 字段。大结果集排序会下推到 Lucene 原生 Sort，避免先全量取回再内存排序。
 

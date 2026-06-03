@@ -84,6 +84,7 @@ public class HttpApiServer implements AutoCloseable {
     private final ClusterMaintenanceService maintenanceService;
     private final ClusterIntrospectionHandlers clusterHandlers;
     private final ServerMetrics serverMetrics;
+    private final WriteBackpressure writeBackpressure;
     private final Duration forwardTimeout;
     private final long writeMaintenanceIntervalMillis;
     private final boolean weakRemoteSnapshotReadsEnabled;
@@ -191,6 +192,11 @@ public class HttpApiServer implements AutoCloseable {
         );
         this.writeMaintenanceIntervalMillis = writeMaintenanceIntervalMillis(writeOptions);
         this.weakRemoteSnapshotReadsEnabled = writeOptions.commitEveryRequest();
+        this.writeBackpressure = new WriteBackpressure(
+                options.maxWriteRequests(),
+                options.maxBulkItems(),
+                options.maxBulkBytes()
+        );
         this.localShardIndexService = new LuceneLocalShardIndexService(
                 dataPath,
                 options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
@@ -542,6 +548,9 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void indexDocument(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
             String index = context.pathParam("index");
             String id = documentId(context);
@@ -589,10 +598,15 @@ public class HttpApiServer implements AutoCloseable {
             json(context, 201, response);
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
     private void deleteDocument(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
             String index = context.pathParam("index");
             String id = context.pathParam("id");
@@ -630,15 +644,24 @@ public class HttpApiServer implements AutoCloseable {
             )));
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
     private void bulk(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         long started = System.nanoTime();
+        boolean async = false;
         try {
+            writeBackpressure.validateBulkBody(context);
             List<BulkItemRequest> items = measured(context, "parse", () -> bulkItems(context));
+            writeBackpressure.validateBulkItemCount(items.size());
             ClusterState state = measured(context, "cluster_state", () -> writableClusterState(context));
             if (state == null) {
+                writeBackpressure.release();
                 return;
             }
             List<Future<List<BulkItemResult>>> futures = measured(context, "plan", () -> executeBulkItems(items, state));
@@ -648,32 +671,45 @@ public class HttpApiServer implements AutoCloseable {
                         "errors", false,
                         "items", List.of()
                 ));
+                writeBackpressure.release();
                 return;
             }
+            async = true;
             Future.all(futures)
                     .onSuccess(ignored -> {
-                        recordStage(context, "shard_execute");
-                        BulkItemResponse[] orderedResponses = new BulkItemResponse[items.size()];
-                        futures.stream()
-                                .flatMap(future -> future.result().stream())
-                                .forEach(result -> orderedResponses[result.ordinal()] = result.response());
-                        List<Map<String, Object>> responses = Arrays.stream(orderedResponses)
-                                .map(BulkItemResponse::asMap)
-                                .toList();
-                        boolean errors = Arrays.stream(orderedResponses)
-                                .anyMatch(BulkItemResponse::failed);
-                        jsonMeasured(context, 200, Map.of(
-                                "took", (System.nanoTime() - started) / 1_000_000,
-                                "errors", errors,
-                                "items", responses
-                        ));
+                        try {
+                            recordStage(context, "shard_execute");
+                            BulkItemResponse[] orderedResponses = new BulkItemResponse[items.size()];
+                            futures.stream()
+                                    .flatMap(future -> future.result().stream())
+                                    .forEach(result -> orderedResponses[result.ordinal()] = result.response());
+                            List<Map<String, Object>> responses = Arrays.stream(orderedResponses)
+                                    .map(BulkItemResponse::asMap)
+                                    .toList();
+                            boolean errors = Arrays.stream(orderedResponses)
+                                    .anyMatch(BulkItemResponse::failed);
+                            jsonMeasured(context, 200, Map.of(
+                                    "took", (System.nanoTime() - started) / 1_000_000,
+                                    "errors", errors,
+                                    "items", responses
+                            ));
+                        } finally {
+                            writeBackpressure.release();
+                        }
                     })
                     .onFailure(e -> {
-                        Exception exception = exception(e);
-                        error(context, status(exception), exception);
+                        try {
+                            Exception exception = exception(e);
+                            error(context, status(exception), exception);
+                        } finally {
+                            writeBackpressure.release();
+                        }
                     });
         } catch (Exception e) {
             error(context, status(e), e);
+            if (!async) {
+                writeBackpressure.release();
+            }
         }
     }
 
@@ -814,7 +850,11 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void internalShardBulk(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
+            writeBackpressure.validateBulkBody(context);
             String index = context.pathParam("index");
             int shard = Integer.parseInt(context.pathParam("shard"));
             ShardId shardId = new ShardId(index, shard);
@@ -824,6 +864,7 @@ public class HttpApiServer implements AutoCloseable {
             validateShardWriteFence(shardId, ownerTerm, allocationEpoch);
             Map<String, FieldMapping> mappings = indexSettings(index, clusterStateRepository.current()).mappings();
             List<Object> requestItems = objectList(body.get("items"));
+            writeBackpressure.validateBulkItemCount(requestItems.size());
             List<BulkItemPlan> plans = new ArrayList<>(requestItems.size());
             WriteRoute route = new WriteRoute(
                     shardId,
@@ -847,6 +888,8 @@ public class HttpApiServer implements AutoCloseable {
             ));
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
@@ -2374,70 +2417,6 @@ public class HttpApiServer implements AutoCloseable {
         return Arrays.stream(NodeRole.values())
                 .filter(role -> roles.contains(role) || role == NodeRole.COORDINATING)
                 .collect(Collectors.toSet());
-    }
-
-    private record BulkItemRequest(
-            String action,
-            String index,
-            String id,
-            String routing,
-            Map<String, Object> source
-    ) {
-    }
-
-    private record BulkItemPlan(
-            int ordinal,
-            BulkItemRequest item,
-            String id,
-            WriteRoute route,
-            Map<String, FieldMapping> mappings
-    ) {
-    }
-
-    private record BulkItemResult(int ordinal, BulkItemResponse response) {
-    }
-
-    private record BulkShardBatchKey(
-            String nodeId,
-            String host,
-            int httpPort,
-            ShardId shardId,
-            long ownerTerm,
-            long allocationEpoch
-    ) {
-    }
-
-    private record BulkItemResponse(
-            String action,
-            String index,
-            String id,
-            int status,
-            String result,
-            Object shardId,
-            Map<String, Object> error
-    ) {
-        private boolean failed() {
-            return error != null || status >= 300;
-        }
-
-        private Map<String, Object> asMap() {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("_index", index);
-            if (id != null) {
-                item.put("_id", id);
-            }
-            item.put("status", status);
-            if (result != null) {
-                item.put("result", result);
-            }
-            if (shardId != null) {
-                item.put("shardId", shardId);
-            }
-            if (error != null) {
-                item.put("error", error);
-            }
-            return Map.of(action, item);
-        }
     }
 
     private record ShardPit(SearchShardTarget target, String pitId) {

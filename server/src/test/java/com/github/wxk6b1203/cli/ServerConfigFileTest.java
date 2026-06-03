@@ -43,6 +43,11 @@ class ServerConfigFileTest {
                     cleanupIntervalSeconds: 30
                   metrics:
                     port: 9500
+                  write:
+                    maxRequests: 8
+                  bulk:
+                    maxItems: 500
+                    maxBytes: 10485760
                   index:
                     commit:
                       everyRequest: false
@@ -83,6 +88,9 @@ class ServerConfigFileTest {
         assertEquals(1048576, options.cacheMaxBytes());
         assertEquals(30, options.cacheCleanupIntervalSeconds());
         assertEquals(9500, options.metricsPort());
+        assertEquals(8, options.maxWriteRequests());
+        assertEquals(500, options.maxBulkItems());
+        assertEquals(10485760, options.maxBulkBytes());
         assertEquals(false, options.commitEveryRequest());
         assertEquals(2500, options.commitIntervalMillis());
         assertEquals(128, options.commitAfterDocs());
@@ -133,7 +141,10 @@ class ServerConfigFileTest {
                 "--commit-interval", "750",
                 "--commit-after-docs", "64",
                 "--refresh-policy", "interval",
-                "--refresh-interval", "500"
+                "--refresh-interval", "500",
+                "--max-write-requests", "3",
+                "--max-bulk-items", "50",
+                "--max-bulk-bytes", "4096"
         );
         ServerOptions options = command.options();
 
@@ -153,5 +164,8 @@ class ServerConfigFileTest {
         assertEquals(64, options.commitAfterDocs());
         assertEquals("interval", options.refreshPolicy());
         assertEquals(500, options.refreshIntervalMillis());
+        assertEquals(3, options.maxWriteRequests());
+        assertEquals(50, options.maxBulkItems());
+        assertEquals(4096, options.maxBulkBytes());
     }
 }
