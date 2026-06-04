@@ -1078,6 +1078,192 @@ public class LuceneLocalShardIndexServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    public void termsAndRangeAggregationsSupportCommonOptions() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.of(
+                "category", new FieldMapping("keyword", null, null, true, true),
+                "pages", new FieldMapping("long", null, null, true, true)
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of(
+                    "category", "search",
+                    "pages", 80
+            ), mappings));
+            service.index(new IndexDocumentRequest("books", shardId, "doc-2", Map.of(
+                    "category", "storage",
+                    "pages", 160
+            ), mappings));
+            service.index(new IndexDocumentRequest("books", shardId, "doc-3", Map.of(
+                    "pages", 260
+            ), mappings));
+            service.index(new IndexDocumentRequest("books", shardId, "doc-4", Map.of(
+                    "category", "search",
+                    "pages", List.of(80, 90)
+            ), mappings));
+
+            var response = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(
+                                    Map.of(
+                                            "name", "by_category",
+                                            "terms", Map.of(
+                                                    "field", "category",
+                                                    "missing", "__missing__",
+                                                    "order", Map.of("_key", "asc"),
+                                                    "min_doc_count", 1,
+                                                    "size", 10
+                                            )
+                                    ),
+                                    Map.of(
+                                            "name", "page_ranges",
+                                            "range", Map.of(
+                                                    "field", "pages",
+                                                    "ranges", List.of(
+                                                            Map.of("key", "short", "to", 100),
+                                                            Map.of("key", "medium", "from", 100, "to", 200),
+                                                            Map.of("key", "long", "from", 200)
+                                                    )
+                                            )
+                                    )
+                            ),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+
+            Map<String, Object> byCategory = (Map<String, Object>) response.aggregations().get("by_category");
+            List<Map<String, Object>> categoryBuckets = (List<Map<String, Object>>) byCategory.get("buckets");
+            assertEquals(List.of("__missing__", "search", "storage"),
+                    categoryBuckets.stream().map(bucket -> bucket.get("key")).toList());
+
+            Map<String, Object> pageRanges = (Map<String, Object>) response.aggregations().get("page_ranges");
+            List<Map<String, Object>> rangeBuckets = (List<Map<String, Object>>) pageRanges.get("buckets");
+            assertEquals(List.of(2L, 1L, 1L), rangeBuckets.stream().map(bucket -> bucket.get("doc_count")).toList());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void termsAggregationKeepsShardBucketsBelowGlobalMinDocCount() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.of(
+                "category", new FieldMapping("keyword", null, null, true, true)
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of(
+                    "category", "common"
+            ), mappings));
+
+            var response = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(Map.of(
+                                    "name", "by_category",
+                                    "terms", Map.of(
+                                            "field", "category",
+                                            "min_doc_count", 2
+                                    )
+                            )),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+
+            Map<String, Object> byCategory = (Map<String, Object>) response.aggregations().get("by_category");
+            List<Map<String, Object>> buckets = (List<Map<String, Object>>) byCategory.get("buckets");
+            assertEquals(List.of("common"), buckets.stream().map(bucket -> bucket.get("key")).toList());
+            assertEquals(List.of(1L), buckets.stream().map(bucket -> bucket.get("doc_count")).toList());
+        }
+    }
+
+    @Test
+    public void rangeAggregationRejectsInvalidPresentBounds() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.of(
+                "pages", new FieldMapping("long", null, null, true, true),
+                "published_at", new FieldMapping("date", null, null, true, true)
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of(
+                    "pages", 80,
+                    "published_at", "2026-01-01"
+            ), mappings));
+
+            IllegalArgumentException numeric = assertThrows(IllegalArgumentException.class, () -> service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(Map.of(
+                                    "name", "page_ranges",
+                                    "range", Map.of(
+                                            "field", "pages",
+                                            "ranges", List.of(Map.of("from", "bad", "to", 100))
+                                    )
+                            )),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            ));
+            assertTrue(numeric.getMessage().contains("from bound"));
+
+            IllegalArgumentException date = assertThrows(IllegalArgumentException.class, () -> service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(Map.of(
+                                    "name", "published_ranges",
+                                    "range", Map.of(
+                                            "field", "published_at",
+                                            "ranges", List.of(Map.of("from", "2026-01-01", "to", "bad"))
+                                    )
+                            )),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            ));
+            assertTrue(date.getMessage().contains("to bound"));
+        }
+    }
+
+    @Test
     public void testSearchAfterUsesSortCursor() throws Exception {
         MemMockProvider metadata = new MemMockProvider();
         ShardId shardId = new ShardId("books", 0);

@@ -116,6 +116,15 @@ public class Server implements Callable<Integer> {
     @CommandLine.Option(names = {"--refresh-interval"}, description = "Refresh interval in milliseconds when refresh-policy=interval")
     private int refreshIntervalMillis = 1000;
 
+    @CommandLine.Option(names = {"--max-write-requests"}, description = "Maximum concurrent write requests. 0 disables write request backpressure.")
+    private int maxWriteRequests = 0;
+
+    @CommandLine.Option(names = {"--max-bulk-items"}, description = "Maximum items accepted in a single bulk request. 0 disables the limit.")
+    private int maxBulkItems = 0;
+
+    @CommandLine.Option(names = {"--max-bulk-bytes"}, description = "Maximum request body bytes accepted by the bulk API. 0 disables the limit.")
+    private long maxBulkBytes = 0;
+
     @CommandLine.Option(names = {"--analyzer-plugin-path"}, description = "Directory or jar file containing third-party Lucene Analyzer plugins")
     private String analyzerPluginPath;
 
@@ -234,7 +243,16 @@ public class Server implements Callable<Integer> {
                         "server.cacheCleanupIntervalSeconds", "server.cache.cleanupIntervalSeconds",
                         "server.cache.cleanup.interval.seconds")),
                 optionValue("--metrics-port", metricsPort, () -> config.intValue(metricsPort,
-                        "metricsPort", "metrics.port", "server.metricsPort", "server.metrics.port"))
+                        "metricsPort", "metrics.port", "server.metricsPort", "server.metrics.port")),
+                optionValue("--max-write-requests", maxWriteRequests, () -> config.intValue(maxWriteRequests,
+                        "maxWriteRequests", "write.maxRequests", "write.max.requests",
+                        "server.maxWriteRequests", "server.write.maxRequests", "server.write.max.requests")),
+                optionValue("--max-bulk-items", maxBulkItems, () -> config.intValue(maxBulkItems,
+                        "maxBulkItems", "bulk.maxItems", "bulk.max.items",
+                        "server.maxBulkItems", "server.bulk.maxItems", "server.bulk.max.items")),
+                optionValue("--max-bulk-bytes", maxBulkBytes, () -> config.longValue(maxBulkBytes,
+                        "maxBulkBytes", "bulk.maxBytes", "bulk.max.bytes",
+                        "server.maxBulkBytes", "server.bulk.maxBytes", "server.bulk.max.bytes"))
         );
     }
 

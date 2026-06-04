@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 
 final class HttpApiResponses {
     private HttpApiResponses() {
@@ -43,6 +44,9 @@ final class HttpApiResponses {
         Throwable cause = responseCause(e);
         if (cause instanceof NotMasterException) {
             return 503;
+        }
+        if (cause instanceof RejectedExecutionException) {
+            return 429;
         }
         if ("IndexNotFoundException".equals(cause.getClass().getSimpleName()) || messageContains(cause, "no segments")) {
             return 503;

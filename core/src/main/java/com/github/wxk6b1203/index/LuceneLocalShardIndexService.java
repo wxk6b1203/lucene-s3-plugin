@@ -1569,6 +1569,8 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
             }
             if (aggregation.get("terms") instanceof Map<?, ?> terms) {
                 results.put(name, termsAggregation(searcher, docIds, sources, mapValue(terms), mappings));
+            } else if (aggregation.get("range") instanceof Map<?, ?> range) {
+                results.put(name, rangeAggregation(searcher, docIds, sources, mapValue(range), mappings));
             } else if (aggregation.get("min") instanceof Map<?, ?> min) {
                 results.put(name, metricAggregation(searcher, docIds, sources, mapValue(min), "min", mappings));
             } else if (aggregation.get("max") instanceof Map<?, ?> max) {
@@ -1593,19 +1595,22 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     ) throws IOException {
         String field = stringValue(spec.get("field"));
         int size = Math.max(1, intValue(spec.get("size"), 10));
+        long minDocCount = Math.max(0, longOrDefault(spec.get("min_doc_count"), 1));
+        Object missing = spec.get("missing");
         Map<String, Long> counts = new HashMap<>();
         FieldMapping mapping = mappings.get(field);
         for (int i = 0; i < docIds.size(); i++) {
             Object value = aggregationValue(searcher, docIds.get(i), field, mapping, sources.get(i));
-            for (Object item : aggregationValues(value)) {
+            List<Object> values = aggregationValues(value);
+            if (values.isEmpty() && missing != null) {
+                values = List.of(missing);
+            }
+            for (Object item : values) {
                 counts.merge(String.valueOf(item), 1L, Long::sum);
             }
         }
         List<Map<String, Object>> buckets = counts.entrySet().stream()
-                .sorted(Comparator
-                        .comparing((Map.Entry<String, Long> entry) -> entry.getValue()).reversed()
-                        .thenComparing(Map.Entry::getKey))
-                .limit(size)
+                .sorted(termsComparator(spec))
                 .map(entry -> Map.<String, Object>of(
                         "key", entry.getKey(),
                         "doc_count", entry.getValue()
@@ -1614,8 +1619,143 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         return Map.of(
                 "type", "terms",
                 "field", field,
+                "size", size,
+                "min_doc_count", minDocCount,
+                "order", termsOrder(spec),
                 "buckets", buckets
         );
+    }
+
+    private Comparator<Map.Entry<String, Long>> termsComparator(Map<String, Object> spec) {
+        Map<String, Object> order = mapValue(spec.get("order"));
+        if (order.isEmpty()) {
+            return Comparator
+                    .comparing((Map.Entry<String, Long> entry) -> entry.getValue()).reversed()
+                    .thenComparing(Map.Entry::getKey);
+        }
+        String by = order.keySet().iterator().next();
+        boolean desc = !"asc".equalsIgnoreCase(String.valueOf(order.get(by)));
+        Comparator<Map.Entry<String, Long>> comparator = "_key".equals(by)
+                ? Map.Entry.comparingByKey()
+                : Comparator.comparing(Map.Entry::getValue);
+        if (desc) {
+            comparator = comparator.reversed();
+        }
+        return comparator.thenComparing(Map.Entry::getKey);
+    }
+
+    private Map<String, Object> termsOrder(Map<String, Object> spec) {
+        Map<String, Object> order = mapValue(spec.get("order"));
+        if (order.isEmpty()) {
+            return Map.of("_count", "desc");
+        }
+        return Map.copyOf(order);
+    }
+
+    private Map<String, Object> rangeAggregation(
+            IndexSearcher searcher,
+            List<Integer> docIds,
+            List<Map<String, Object>> sources,
+            Map<String, Object> spec,
+            Map<String, FieldMapping> mappings
+    ) throws IOException {
+        String field = stringValue(spec.get("field"));
+        FieldMapping mapping = mappings.get(field);
+        List<RangeBucket> ranges = rangeBuckets(spec, mapping);
+        long[] counts = new long[ranges.size()];
+        for (int i = 0; i < docIds.size(); i++) {
+            boolean[] matched = new boolean[ranges.size()];
+            for (Object item : aggregationValues(aggregationValue(searcher, docIds.get(i), field, mapping, sources.get(i)))) {
+                Double value = aggregationNumber(item, mapping);
+                if (value == null) {
+                    continue;
+                }
+                for (int range = 0; range < ranges.size(); range++) {
+                    if (ranges.get(range).contains(value)) {
+                        matched[range] = true;
+                    }
+                }
+            }
+            for (int range = 0; range < matched.length; range++) {
+                if (matched[range]) {
+                    counts[range]++;
+                }
+            }
+        }
+        List<Map<String, Object>> buckets = new ArrayList<>(ranges.size());
+        for (int i = 0; i < ranges.size(); i++) {
+            RangeBucket range = ranges.get(i);
+            Map<String, Object> bucket = new LinkedHashMap<>();
+            bucket.put("key", range.key());
+            if (range.from() != null) {
+                bucket.put("from", range.fromValue());
+            }
+            if (range.to() != null) {
+                bucket.put("to", range.toValue());
+            }
+            bucket.put("doc_count", counts[i]);
+            buckets.add(bucket);
+        }
+        return Map.of(
+                "type", "range",
+                "field", field,
+                "buckets", buckets
+        );
+    }
+
+    private List<RangeBucket> rangeBuckets(Map<String, Object> spec, FieldMapping mapping) {
+        String field = stringValue(spec.get("field"));
+        List<Object> ranges = objectList(spec.get("ranges"));
+        if (ranges.isEmpty()) {
+            throw new IllegalArgumentException("range aggregation requires ranges");
+        }
+        List<RangeBucket> buckets = new ArrayList<>(ranges.size());
+        for (Object value : ranges) {
+            Map<String, Object> range = mapValue(value);
+            boolean hasFrom = range.containsKey("from");
+            boolean hasTo = range.containsKey("to");
+            Object fromValue = range.get("from");
+            Object toValue = range.get("to");
+            Double from = aggregationBound(fromValue, hasFrom, field, "from", mapping);
+            Double to = aggregationBound(toValue, hasTo, field, "to", mapping);
+            String key = stringValue(range.get("key"));
+            if (key == null || key.isBlank()) {
+                key = (!hasFrom ? "*" : String.valueOf(fromValue))
+                        + "-"
+                        + (!hasTo ? "*" : String.valueOf(toValue));
+            }
+            buckets.add(new RangeBucket(key, from, to, fromValue, toValue));
+        }
+        return buckets;
+    }
+
+    private Double aggregationBound(
+            Object value,
+            boolean present,
+            String field,
+            String bound,
+            FieldMapping mapping
+    ) {
+        if (!present) {
+            return null;
+        }
+        Double number = aggregationNumber(value, mapping);
+        if (number == null) {
+            throw new IllegalArgumentException("range aggregation " + bound
+                    + " bound must be numeric or date for field: " + field);
+        }
+        return number;
+    }
+
+    private Double aggregationNumber(Object value, FieldMapping mapping) {
+        if (value == null) {
+            return null;
+        }
+        if (mapping != null && mapping.date()) {
+            Long date = dateValue(value, mapping);
+            return date == null ? null : date.doubleValue();
+        }
+        return doubleValue(value);
     }
 
     private Map<String, Object> metricAggregation(
@@ -1728,6 +1868,13 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     @SuppressWarnings("unchecked")
     private Map<String, Object> mapValue(Object value) {
         return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
+    }
+
+    private List<Object> objectList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        return list.stream().map(item -> (Object) item).toList();
     }
 
     private int intValue(Object value, int defaultValue) {
@@ -2552,6 +2699,18 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private record RemoteSearcherKey(ShardId shardId, long generation) {
+    }
+
+    private record RangeBucket(
+            String key,
+            Double from,
+            Double to,
+            Object fromValue,
+            Object toValue
+    ) {
+        private boolean contains(double value) {
+            return (from == null || value >= from) && (to == null || value < to);
+        }
     }
 
     private static final class CachedRemoteSearcher implements AutoCloseable {

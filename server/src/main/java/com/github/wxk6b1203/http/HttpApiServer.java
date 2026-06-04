@@ -84,6 +84,8 @@ public class HttpApiServer implements AutoCloseable {
     private final ClusterMaintenanceService maintenanceService;
     private final ClusterIntrospectionHandlers clusterHandlers;
     private final ServerMetrics serverMetrics;
+    private final WriteBackpressure writeBackpressure;
+    private final long bulkBodyLimit;
     private final Duration forwardTimeout;
     private final long writeMaintenanceIntervalMillis;
     private final boolean weakRemoteSnapshotReadsEnabled;
@@ -191,6 +193,12 @@ public class HttpApiServer implements AutoCloseable {
         );
         this.writeMaintenanceIntervalMillis = writeMaintenanceIntervalMillis(writeOptions);
         this.weakRemoteSnapshotReadsEnabled = writeOptions.commitEveryRequest();
+        this.writeBackpressure = new WriteBackpressure(
+                options.maxWriteRequests(),
+                options.maxBulkItems(),
+                options.maxBulkBytes()
+        );
+        this.bulkBodyLimit = bodyLimit(options.maxBulkBytes());
         this.localShardIndexService = new LuceneLocalShardIndexService(
                 dataPath,
                 options.s3Enabled() ? options.s3Bucket() : "lucene-s3",
@@ -287,6 +295,10 @@ public class HttpApiServer implements AutoCloseable {
         return interval == Long.MAX_VALUE ? 0 : Math.max(1, interval);
     }
 
+    static long bodyLimit(long maxBulkBytes) {
+        return maxBulkBytes <= 0 ? -1 : maxBulkBytes;
+    }
+
     private void recordMetrics(RoutingContext context) {
         long started = System.nanoTime();
         context.put(REQUEST_START_NANOS, started);
@@ -344,13 +356,24 @@ public class HttpApiServer implements AutoCloseable {
     public Future<HttpServer> start() {
         Router router = Router.router(vertx);
         router.route().handler(this::recordMetrics);
+        router.post("/_bulk")
+                .handler(BodyHandler.create().setBodyLimit(bulkBodyLimit))
+                .handler(this::recordBodyReadStage)
+                .blockingHandler(this::bulk, false);
+        router.post("/:index/_bulk")
+                .handler(BodyHandler.create().setBodyLimit(bulkBodyLimit))
+                .handler(this::recordBodyReadStage)
+                .blockingHandler(this::bulk, false);
+        router.post("/_internal/:index/:shard/_bulk")
+                .handler(BodyHandler.create().setBodyLimit(-1))
+                .handler(this::recordBodyReadStage)
+                .blockingHandler(this::internalShardBulk, false);
         router.route().handler(BodyHandler.create());
         router.route().handler(this::recordBodyReadStage);
 
         router.post("/_internal/:index/:shard/_search").blockingHandler(this::internalShardSearch, false);
         router.post("/_internal/:index/:shard/_pit").blockingHandler(this::internalShardOpenPit, false);
         router.delete("/_internal/_pit/:pit").blockingHandler(this::internalShardClosePit, false);
-        router.post("/_internal/:index/:shard/_bulk").blockingHandler(this::internalShardBulk, false);
         router.post("/_internal/:index/:shard/_delete_by_query").blockingHandler(this::internalShardDeleteByQuery, false);
         router.post("/_internal/:index/:shard/_update_by_query").blockingHandler(this::internalShardUpdateByQuery, false);
         router.get("/_cluster/state").blockingHandler(clusterHandlers::clusterState, false);
@@ -362,7 +385,6 @@ public class HttpApiServer implements AutoCloseable {
         router.get("/_snapshot_status").blockingHandler(clusterHandlers::snapshotStatus, false);
         router.get("/_uploads").blockingHandler(clusterHandlers::uploadStatus, false);
         router.post("/_uploads/_retry").blockingHandler(clusterHandlers::retryUploads, false);
-        router.post("/_bulk").blockingHandler(this::bulk, false);
         router.delete("/_pit").blockingHandler(this::closePointInTime, false);
         router.put("/:index").blockingHandler(this::createIndex, false);
         router.delete("/:index").blockingHandler(this::deleteIndex, false);
@@ -371,7 +393,6 @@ public class HttpApiServer implements AutoCloseable {
         router.post("/:index/_uploads/_retry").blockingHandler(clusterHandlers::retryUploads, false);
         router.get("/:index/_mapping").blockingHandler(this::getMapping, false);
         router.put("/:index/_mapping").blockingHandler(this::putMapping, false);
-        router.post("/:index/_bulk").blockingHandler(this::bulk, false);
         router.post("/:index/_doc").blockingHandler(this::indexDocument, false);
         router.post("/:index/_doc/:id").blockingHandler(this::indexDocument, false);
         router.delete("/:index/_doc/:id").blockingHandler(this::deleteDocument, false);
@@ -542,6 +563,9 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void indexDocument(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
             String index = context.pathParam("index");
             String id = documentId(context);
@@ -589,10 +613,15 @@ public class HttpApiServer implements AutoCloseable {
             json(context, 201, response);
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
     private void deleteDocument(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
             String index = context.pathParam("index");
             String id = context.pathParam("id");
@@ -630,15 +659,24 @@ public class HttpApiServer implements AutoCloseable {
             )));
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
     private void bulk(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         long started = System.nanoTime();
+        boolean async = false;
         try {
+            writeBackpressure.validateBulkBody(context);
             List<BulkItemRequest> items = measured(context, "parse", () -> bulkItems(context));
+            writeBackpressure.validateBulkItemCount(items.size());
             ClusterState state = measured(context, "cluster_state", () -> writableClusterState(context));
             if (state == null) {
+                writeBackpressure.release();
                 return;
             }
             List<Future<List<BulkItemResult>>> futures = measured(context, "plan", () -> executeBulkItems(items, state));
@@ -648,32 +686,45 @@ public class HttpApiServer implements AutoCloseable {
                         "errors", false,
                         "items", List.of()
                 ));
+                writeBackpressure.release();
                 return;
             }
+            async = true;
             Future.all(futures)
                     .onSuccess(ignored -> {
-                        recordStage(context, "shard_execute");
-                        BulkItemResponse[] orderedResponses = new BulkItemResponse[items.size()];
-                        futures.stream()
-                                .flatMap(future -> future.result().stream())
-                                .forEach(result -> orderedResponses[result.ordinal()] = result.response());
-                        List<Map<String, Object>> responses = Arrays.stream(orderedResponses)
-                                .map(BulkItemResponse::asMap)
-                                .toList();
-                        boolean errors = Arrays.stream(orderedResponses)
-                                .anyMatch(BulkItemResponse::failed);
-                        jsonMeasured(context, 200, Map.of(
-                                "took", (System.nanoTime() - started) / 1_000_000,
-                                "errors", errors,
-                                "items", responses
-                        ));
+                        try {
+                            recordStage(context, "shard_execute");
+                            BulkItemResponse[] orderedResponses = new BulkItemResponse[items.size()];
+                            futures.stream()
+                                    .flatMap(future -> future.result().stream())
+                                    .forEach(result -> orderedResponses[result.ordinal()] = result.response());
+                            List<Map<String, Object>> responses = Arrays.stream(orderedResponses)
+                                    .map(BulkItemResponse::asMap)
+                                    .toList();
+                            boolean errors = Arrays.stream(orderedResponses)
+                                    .anyMatch(BulkItemResponse::failed);
+                            jsonMeasured(context, 200, Map.of(
+                                    "took", (System.nanoTime() - started) / 1_000_000,
+                                    "errors", errors,
+                                    "items", responses
+                            ));
+                        } finally {
+                            writeBackpressure.release();
+                        }
                     })
                     .onFailure(e -> {
-                        Exception exception = exception(e);
-                        error(context, status(exception), exception);
+                        try {
+                            Exception exception = exception(e);
+                            error(context, status(exception), exception);
+                        } finally {
+                            writeBackpressure.release();
+                        }
                     });
         } catch (Exception e) {
             error(context, status(e), e);
+            if (!async) {
+                writeBackpressure.release();
+            }
         }
     }
 
@@ -814,6 +865,9 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void internalShardBulk(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
             String index = context.pathParam("index");
             int shard = Integer.parseInt(context.pathParam("shard"));
@@ -824,6 +878,7 @@ public class HttpApiServer implements AutoCloseable {
             validateShardWriteFence(shardId, ownerTerm, allocationEpoch);
             Map<String, FieldMapping> mappings = indexSettings(index, clusterStateRepository.current()).mappings();
             List<Object> requestItems = objectList(body.get("items"));
+            writeBackpressure.validateBulkItemCount(requestItems.size());
             List<BulkItemPlan> plans = new ArrayList<>(requestItems.size());
             WriteRoute route = new WriteRoute(
                     shardId,
@@ -847,6 +902,8 @@ public class HttpApiServer implements AutoCloseable {
             ));
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
@@ -874,6 +931,9 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void internalShardDeleteByQuery(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
             String index = context.pathParam("index");
             int shard = Integer.parseInt(context.pathParam("shard"));
@@ -886,10 +946,15 @@ public class HttpApiServer implements AutoCloseable {
             ));
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
     private void internalShardUpdateByQuery(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
         try {
             String index = context.pathParam("index");
             int shard = Integer.parseInt(context.pathParam("shard"));
@@ -902,6 +967,8 @@ public class HttpApiServer implements AutoCloseable {
             ));
         } catch (Exception e) {
             error(context, status(e), e);
+        } finally {
+            writeBackpressure.release();
         }
     }
 
@@ -1784,10 +1851,15 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void updateByQuery(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
+        boolean async = false;
         try {
             ByQueryRequest request = byQueryRequest(context);
             ClusterState state = writableClusterState(context);
             if (state == null) {
+                writeBackpressure.release();
                 return;
             }
             request = withMappings(request, indexSettings(request.indexName(), state).mappings());
@@ -1806,14 +1878,28 @@ public class HttpApiServer implements AutoCloseable {
                     "owner"
             );
             SearchPlan plan = searchPlanner.plan(searchRequest, state);
-            executeUpdateByQueryPlan(plan, request)
-                    .onSuccess(response -> json(context, 200, response))
+            Future<ByQueryResponse> future = executeUpdateByQueryPlan(plan, request);
+            async = true;
+            future.onSuccess(response -> {
+                        try {
+                            json(context, 200, response);
+                        } finally {
+                            writeBackpressure.release();
+                        }
+                    })
                     .onFailure(e -> {
-                        Exception exception = exception(e);
-                        error(context, status(exception), exception);
+                        try {
+                            Exception exception = exception(e);
+                            error(context, status(exception), exception);
+                        } finally {
+                            writeBackpressure.release();
+                        }
                     });
         } catch (Exception e) {
             error(context, status(e), e);
+            if (!async) {
+                writeBackpressure.release();
+            }
         }
     }
 
@@ -1841,10 +1927,15 @@ public class HttpApiServer implements AutoCloseable {
     }
 
     private void deleteByQuery(RoutingContext context) {
+        if (!writeBackpressure.acquire(context)) {
+            return;
+        }
+        boolean async = false;
         try {
             ByQueryRequest request = byQueryRequest(context);
             ClusterState state = writableClusterState(context);
             if (state == null) {
+                writeBackpressure.release();
                 return;
             }
             request = withMappings(request, indexSettings(request.indexName(), state).mappings());
@@ -1863,14 +1954,28 @@ public class HttpApiServer implements AutoCloseable {
                     "owner"
             );
             SearchPlan plan = searchPlanner.plan(searchRequest, state);
-            executeDeleteByQueryPlan(plan, request)
-                    .onSuccess(response -> json(context, 200, response))
+            Future<ByQueryResponse> future = executeDeleteByQueryPlan(plan, request);
+            async = true;
+            future.onSuccess(response -> {
+                        try {
+                            json(context, 200, response);
+                        } finally {
+                            writeBackpressure.release();
+                        }
+                    })
                     .onFailure(e -> {
-                        Exception exception = exception(e);
-                        error(context, status(exception), exception);
+                        try {
+                            Exception exception = exception(e);
+                            error(context, status(exception), exception);
+                        } finally {
+                            writeBackpressure.release();
+                        }
                     });
         } catch (Exception e) {
             error(context, status(e), e);
+            if (!async) {
+                writeBackpressure.release();
+            }
         }
     }
 
@@ -2374,70 +2479,6 @@ public class HttpApiServer implements AutoCloseable {
         return Arrays.stream(NodeRole.values())
                 .filter(role -> roles.contains(role) || role == NodeRole.COORDINATING)
                 .collect(Collectors.toSet());
-    }
-
-    private record BulkItemRequest(
-            String action,
-            String index,
-            String id,
-            String routing,
-            Map<String, Object> source
-    ) {
-    }
-
-    private record BulkItemPlan(
-            int ordinal,
-            BulkItemRequest item,
-            String id,
-            WriteRoute route,
-            Map<String, FieldMapping> mappings
-    ) {
-    }
-
-    private record BulkItemResult(int ordinal, BulkItemResponse response) {
-    }
-
-    private record BulkShardBatchKey(
-            String nodeId,
-            String host,
-            int httpPort,
-            ShardId shardId,
-            long ownerTerm,
-            long allocationEpoch
-    ) {
-    }
-
-    private record BulkItemResponse(
-            String action,
-            String index,
-            String id,
-            int status,
-            String result,
-            Object shardId,
-            Map<String, Object> error
-    ) {
-        private boolean failed() {
-            return error != null || status >= 300;
-        }
-
-        private Map<String, Object> asMap() {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("_index", index);
-            if (id != null) {
-                item.put("_id", id);
-            }
-            item.put("status", status);
-            if (result != null) {
-                item.put("result", result);
-            }
-            if (shardId != null) {
-                item.put("shardId", shardId);
-            }
-            if (error != null) {
-                item.put("error", error);
-            }
-            return Map.of(action, item);
-        }
     }
 
     private record ShardPit(SearchShardTarget target, String pitId) {

@@ -56,6 +56,9 @@ class HttpApiServerTest {
                 Duration.ofMillis(50)
         )));
         assertEquals(0, HttpApiServer.writeMaintenanceIntervalMillis(IndexWriteOptions.defaults()));
+        assertEquals(-1, HttpApiServer.bodyLimit(0));
+        assertEquals(-1, HttpApiServer.bodyLimit(-1));
+        assertEquals(1024, HttpApiServer.bodyLimit(1024));
     }
 
     @AfterEach
@@ -540,6 +543,46 @@ class HttpApiServerTest {
 
     @Test
     @Timeout(60)
+    void bulkBackpressureRejectsOversizedRequests() throws Exception {
+        startServer(2, "async", true, 0, 0, "immediate", 0, 1, 0);
+        createBooksIndex();
+
+        postRaw("/_bulk", """
+                {"index":{"_index":"books","_id":"doc-1"}}
+                {"category":"bulk","pages":1,"embedding":[1.0,0.0]}
+                {"index":{"_index":"books","_id":"doc-2"}}
+                {"category":"bulk","pages":2,"embedding":[0.0,1.0]}
+                """, 429);
+
+        postRaw("/_bulk", """
+                {"index":{"_index":"books","_id":"doc-4"}}
+                {"category":"ok","pages":4,"embedding":[1.0,0.0]}
+                """, 200);
+        Map<String, Object> search = post("/books/_search", Map.of(
+                "query", Map.of("term", Map.of("category", "ok"))
+        ), 200);
+        assertEquals(List.of("doc-4"), hitIds(search));
+    }
+
+    @Test
+    @Timeout(60)
+    void bulkBodyLimitRejectsBeforeBulkHandler() throws Exception {
+        startServer(2, "async", true, 0, 0, "immediate", 0, 0, 120);
+        createBooksIndex();
+
+        assertEquals(413, responseRaw("POST", "/_bulk", """
+                {"index":{"_index":"books","_id":"doc-3"}}
+                {"category":"bulk","pages":333,"embedding":[1.0,1.0],"description":"this body should exceed the configured bulk byte limit"}
+                """).status());
+
+        postRaw("/_bulk", """
+                {"index":{"_index":"books","_id":"doc-4"}}
+                {"category":"ok","pages":4,"embedding":[1.0,0.0]}
+                """, 200);
+    }
+
+    @Test
+    @Timeout(60)
     void httpErrorsUseSpecificStatusCodes() throws Exception {
         startServer();
 
@@ -623,6 +666,31 @@ class HttpApiServerTest {
 
     @Test
     @Timeout(60)
+    void internalShardBulkSkipsPublicBodySizeLimit() throws Exception {
+        startServer(2, "async", true, 0, 0, "immediate", 0, 10, 20);
+        createBooksIndex();
+
+        Map<String, Object> route = get("/books/_write_route?routing=doc-1", 200);
+        Map<String, Object> bulk = post("/_internal/books/0/_bulk", Map.of(
+                "owner_term", route.get("ownerTerm"),
+                "allocation_epoch", route.get("allocationEpoch"),
+                "items", List.of(Map.of(
+                        "action", "index",
+                        "index", "books",
+                        "id", "doc-1",
+                        "source", Map.of(
+                                "category", "internal",
+                                "pages", 1,
+                                "description", "internal envelope is larger than public NDJSON body limit"
+                        )
+                ))
+        ), 200);
+
+        assertEquals(false, bulk.get("errors"));
+    }
+
+    @Test
+    @Timeout(60)
     void deleteIndexClearsLocalAndRemoteShardDataBeforeSameNameRecreate() throws Exception {
         startServer();
         createBooksIndex();
@@ -641,7 +709,7 @@ class HttpApiServerTest {
     @Test
     @Timeout(60)
     void byQueryWritesCarryShardFenceAndInternalWritesRequireIt() throws Exception {
-        startServer();
+        startServer(2, "async", true, 0, 0, "immediate", 1, 0, 0);
         createBooksIndex();
         indexBook("doc-1", "visible", 100, List.of(1.0, 0.0));
 
@@ -764,6 +832,21 @@ class HttpApiServerTest {
             int commitAfterDocs,
             String refreshPolicy
     ) throws Exception {
+        startServer(snapshotRetainLatest, uploadWaitStrategy, commitEveryRequest, commitIntervalMillis,
+                commitAfterDocs, refreshPolicy, 0, 0, 0);
+    }
+
+    private void startServer(
+            int snapshotRetainLatest,
+            String uploadWaitStrategy,
+            boolean commitEveryRequest,
+            int commitIntervalMillis,
+            int commitAfterDocs,
+            String refreshPolicy,
+            int maxWriteRequests,
+            int maxBulkItems,
+            long maxBulkBytes
+    ) throws Exception {
         port = freePort();
         server = new HttpApiServer(new ServerOptions(
                 port,
@@ -796,7 +879,10 @@ class HttpApiServerTest {
                 null,
                 0,
                 60,
-                0
+                0,
+                maxWriteRequests,
+                maxBulkItems,
+                maxBulkBytes
         ));
         server.start().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
     }

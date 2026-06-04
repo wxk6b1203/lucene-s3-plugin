@@ -35,7 +35,10 @@ public record ServerOptions(
         String analyzerPluginPath,
         long cacheMaxBytes,
         int cacheCleanupIntervalSeconds,
-        int metricsPort
+        int metricsPort,
+        int maxWriteRequests,
+        int maxBulkItems,
+        long maxBulkBytes
 ) {
     public ServerOptions {
         etcdTimeoutSeconds = Math.max(1, etcdTimeoutSeconds);
@@ -56,6 +59,9 @@ public record ServerOptions(
         cacheMaxBytes = Math.max(0, cacheMaxBytes);
         cacheCleanupIntervalSeconds = Math.max(1, cacheCleanupIntervalSeconds);
         metricsPort = Math.max(0, metricsPort);
+        maxWriteRequests = Math.max(0, maxWriteRequests);
+        maxBulkItems = Math.max(0, maxBulkItems);
+        maxBulkBytes = Math.max(0, maxBulkBytes);
     }
 
     public ServerOptions(
@@ -108,6 +114,9 @@ public record ServerOptions(
                 null,
                 0,
                 60,
+                0,
+                0,
+                0,
                 0
         );
     }
@@ -163,6 +172,9 @@ public record ServerOptions(
                 null,
                 0,
                 60,
+                0,
+                0,
+                0,
                 0
         );
     }
@@ -220,6 +232,9 @@ public record ServerOptions(
                 null,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
+                0,
+                0,
+                0,
                 0
         );
     }
@@ -278,7 +293,10 @@ public record ServerOptions(
                 null,
                 cacheMaxBytes,
                 cacheCleanupIntervalSeconds,
-                metricsPort
+                metricsPort,
+                0,
+                0,
+                0
         );
     }
 
