@@ -1201,6 +1201,69 @@ public class LuceneLocalShardIndexServiceTest {
     }
 
     @Test
+    public void rangeAggregationRejectsInvalidPresentBounds() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.of(
+                "pages", new FieldMapping("long", null, null, true, true),
+                "published_at", new FieldMapping("date", null, null, true, true)
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of(
+                    "pages", 80,
+                    "published_at", "2026-01-01"
+            ), mappings));
+
+            IllegalArgumentException numeric = assertThrows(IllegalArgumentException.class, () -> service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(Map.of(
+                                    "name", "page_ranges",
+                                    "range", Map.of(
+                                            "field", "pages",
+                                            "ranges", List.of(Map.of("from", "bad", "to", 100))
+                                    )
+                            )),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            ));
+            assertTrue(numeric.getMessage().contains("from bound"));
+
+            IllegalArgumentException date = assertThrows(IllegalArgumentException.class, () -> service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(Map.of(
+                                    "name", "published_ranges",
+                                    "range", Map.of(
+                                            "field", "published_at",
+                                            "ranges", List.of(Map.of("from", "2026-01-01", "to", "bad"))
+                                    )
+                            )),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            ));
+            assertTrue(date.getMessage().contains("to bound"));
+        }
+    }
+
+    @Test
     public void testSearchAfterUsesSortCursor() throws Exception {
         MemMockProvider metadata = new MemMockProvider();
         ShardId shardId = new ShardId("books", 0);

@@ -230,7 +230,7 @@ Windows 使用：
 | `--snapshot-retain-latest` | `2` | 每个 shard 至少保留的最新 commit snapshot generation 数。PIT pin 住的 generation 会额外保留。 |
 | `--max-write-requests` | `0` | 同一节点允许同时进入写入路径的请求数。`0` 表示不限制，超过限制会返回 `429`。 |
 | `--max-bulk-items` | `0` | 单个 bulk 请求允许的最大 item 数。`0` 表示不限制，超过限制会返回 `429`。 |
-| `--max-bulk-bytes` | `0` | 单个 bulk 请求体最大字节数。`0` 表示不限制，超过限制会返回 `429`。 |
+| `--max-bulk-bytes` | `0` | 单个 public bulk 请求体最大字节数。`0` 表示不限制，超过限制会在读取 body 阶段返回 `413`。 |
 
 YAML 示例：
 
@@ -769,6 +769,7 @@ curl -X POST http://127.0.0.1:9200/books/_search_plan \
 - `400`: 请求参数、mapping、query、sort、bulk 格式等客户端输入错误。
 - `404`: index、mapping、PIT 等资源不存在或 PIT 已过期。
 - `409`: index/document/mapping 已存在、写入 fence 过期、shard 当前不可写等状态冲突。
+- `413`: 请求体超过 body limit，例如 public bulk 超过 `--max-bulk-bytes`。
 - `502`: 远端 shard RPC 或 S3-compatible 服务返回错误。
 - `503`: 当前节点不是 master、master 不可用、无可用 DATA 节点、远端 commit snapshot 暂不可读、etcd/S3 客户端不可用等临时后端不可用。
 - `500`: 本地 IO 或未分类内部错误。

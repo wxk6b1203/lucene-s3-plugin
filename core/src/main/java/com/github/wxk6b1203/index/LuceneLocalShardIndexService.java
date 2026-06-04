@@ -1704,6 +1704,7 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
     }
 
     private List<RangeBucket> rangeBuckets(Map<String, Object> spec, FieldMapping mapping) {
+        String field = stringValue(spec.get("field"));
         List<Object> ranges = objectList(spec.get("ranges"));
         if (ranges.isEmpty()) {
             throw new IllegalArgumentException("range aggregation requires ranges");
@@ -1711,19 +1712,39 @@ public class LuceneLocalShardIndexService implements LocalShardIndexService {
         List<RangeBucket> buckets = new ArrayList<>(ranges.size());
         for (Object value : ranges) {
             Map<String, Object> range = mapValue(value);
+            boolean hasFrom = range.containsKey("from");
+            boolean hasTo = range.containsKey("to");
             Object fromValue = range.get("from");
             Object toValue = range.get("to");
-            Double from = aggregationNumber(fromValue, mapping);
-            Double to = aggregationNumber(toValue, mapping);
+            Double from = aggregationBound(fromValue, hasFrom, field, "from", mapping);
+            Double to = aggregationBound(toValue, hasTo, field, "to", mapping);
             String key = stringValue(range.get("key"));
             if (key == null || key.isBlank()) {
-                key = (fromValue == null ? "*" : String.valueOf(fromValue))
+                key = (!hasFrom ? "*" : String.valueOf(fromValue))
                         + "-"
-                        + (toValue == null ? "*" : String.valueOf(toValue));
+                        + (!hasTo ? "*" : String.valueOf(toValue));
             }
             buckets.add(new RangeBucket(key, from, to, fromValue, toValue));
         }
         return buckets;
+    }
+
+    private Double aggregationBound(
+            Object value,
+            boolean present,
+            String field,
+            String bound,
+            FieldMapping mapping
+    ) {
+        if (!present) {
+            return null;
+        }
+        Double number = aggregationNumber(value, mapping);
+        if (number == null) {
+            throw new IllegalArgumentException("range aggregation " + bound
+                    + " bound must be numeric or date for field: " + field);
+        }
+        return number;
     }
 
     private Double aggregationNumber(Object value, FieldMapping mapping) {
