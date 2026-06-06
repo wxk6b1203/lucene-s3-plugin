@@ -6,6 +6,7 @@ import com.github.wxk6b1203.metadata.common.IndexFile;
 import com.github.wxk6b1203.metadata.common.IndexFileStatus;
 import com.github.wxk6b1203.metadata.provider.mem.MemMockProvider;
 import com.github.wxk6b1203.search.ByQueryRequest;
+import com.github.wxk6b1203.search.SearchHit;
 import com.github.wxk6b1203.search.SearchRequest;
 import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.store.common.PathUtil;
@@ -25,6 +26,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -84,6 +86,148 @@ public class LuceneLocalShardIndexServiceTest {
             assertTrue(response.tookMillis() > 0);
             assertEquals("doc-1", response.hits().getFirst().id());
             assertEquals("Lucene", response.hits().getFirst().source().get("title"));
+        }
+    }
+
+    @Test
+    public void existsTermsAndPrefixQueriesFilterMappedFields() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        Map<String, FieldMapping> mappings = Map.of(
+                "category", new FieldMapping("keyword", null, null, true, true),
+                "pages", new FieldMapping("integer", null, null, true, true),
+                "indexed_only_keyword", new FieldMapping("keyword", null, null, true, true, false),
+                "indexed_only_number", new FieldMapping("integer", null, null, true, true, false),
+                "embedding", new FieldMapping("dense_vector", 2, "cosine", true, true)
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        )) {
+            service.index(new IndexDocumentRequest(
+                    "books",
+                    shardId,
+                    "doc-1",
+                    Map.of(
+                            "title", "Lucene",
+                            "category", "search",
+                            "pages", 120,
+                            "indexed_only_keyword", "visible",
+                            "embedding", List.of(1.0f, 0.0f)
+                    ),
+                    mappings
+            ));
+            service.index(new IndexDocumentRequest(
+                    "books",
+                    shardId,
+                    "doc-2",
+                    Map.of(
+                            "title", "S3",
+                            "category", "storage",
+                            "pages", 90,
+                            "indexed_only_number", 7
+                    ),
+                    mappings
+            ));
+            service.index(new IndexDocumentRequest(
+                    "books",
+                    shardId,
+                    "doc-3",
+                    Map.of("title", "Draft"),
+                    mappings
+            ));
+
+            var terms = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("terms", Map.of("category", List.of("search", "missing"))),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals(List.of("doc-1"), terms.hits().stream().map(SearchHit::id).toList());
+
+            var prefix = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("prefix", Map.of("category", Map.of("value", "stor"))),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals(List.of("doc-2"), prefix.hits().stream().map(SearchHit::id).toList());
+
+            var exists = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("exists", Map.of("field", "pages")),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals(List.of("doc-1", "doc-2"), exists.hits().stream().map(SearchHit::id).toList());
+
+            var existsIndexedOnlyKeyword = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("exists", Map.of("field", "indexed_only_keyword")),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals(List.of("doc-1"), existsIndexedOnlyKeyword.hits().stream().map(SearchHit::id).toList());
+
+            var existsIndexedOnlyNumber = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("exists", Map.of("field", "indexed_only_number")),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals(List.of("doc-2"), existsIndexedOnlyNumber.hits().stream().map(SearchHit::id).toList());
+
+            var existsVector = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("exists", Map.of("field", "embedding")),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            mappings
+                    )
+            );
+            assertEquals(List.of("doc-1"), existsVector.hits().stream().map(SearchHit::id).toList());
         }
     }
 
@@ -234,6 +378,48 @@ public class LuceneLocalShardIndexServiceTest {
             waitForCleanSegment(metadata, "books__shard_0");
 
             waitForCommittedSegmentFileCount(walPath, 1);
+        }
+    }
+
+    @Test
+    public void faultyRemoteObjectStoreRetriesTransientUploadFailure() throws Exception {
+        MemMockProvider metadata = new MemMockProvider();
+        ShardId shardId = new ShardId("books", 0);
+        FaultyRemoteObjectStore remote = new FaultyRemoteObjectStore(
+                new LocalFileRemoteObjectStore(tempDir.resolve("remote"))
+        );
+        try (LuceneLocalShardIndexService service = new LuceneLocalShardIndexService(
+                tempDir,
+                "bucket",
+                metadata,
+                remote
+        )) {
+            remote.failNextPuts(1);
+            service.index(new IndexDocumentRequest("books", shardId, "doc-1", Map.of("title", "transient")));
+            waitForUncleanSegment(metadata, "books__shard_0");
+            assertEquals(1, remote.putFailures());
+
+            service.retryPendingUploads(List.of(shardId));
+            waitForCleanSnapshot(metadata, "books__shard_0");
+
+            var remoteOnly = service.search(
+                    shardId,
+                    new SearchRequest(
+                            "books",
+                            Map.of("match_all", Map.of()),
+                            List.of(),
+                            null,
+                            null,
+                            0,
+                            10,
+                            List.of(),
+                            List.of(),
+                            null,
+                            Map.of(),
+                            "remote"
+                    )
+            );
+            assertEquals(List.of("doc-1"), remoteOnly.hits().stream().map(SearchHit::id).toList());
         }
     }
 
@@ -1753,6 +1939,49 @@ public class LuceneLocalShardIndexServiceTest {
         public void put(String key, Path source) throws IOException {
             if (failPuts.get()) {
                 throw new IOException("upload intentionally blocked");
+            }
+            delegate.put(key, source);
+        }
+
+        @Override
+        public void get(String key, Path target) throws IOException {
+            delegate.get(key, target);
+        }
+
+        @Override
+        public void delete(Collection<String> keys) throws IOException {
+            delegate.delete(keys);
+        }
+    }
+
+    private static final class FaultyRemoteObjectStore implements RemoteObjectStore {
+        private final RemoteObjectStore delegate;
+        private final AtomicInteger failedPutsRemaining = new AtomicInteger();
+        private final AtomicInteger putFailures = new AtomicInteger();
+
+        private FaultyRemoteObjectStore(RemoteObjectStore delegate) {
+            this.delegate = delegate;
+        }
+
+        private void failNextPuts(int count) {
+            failedPutsRemaining.set(count);
+        }
+
+        private int putFailures() {
+            return putFailures.get();
+        }
+
+        @Override
+        public void put(String key, Path source) throws IOException {
+            while (true) {
+                int remaining = failedPutsRemaining.get();
+                if (remaining <= 0) {
+                    break;
+                }
+                if (failedPutsRemaining.compareAndSet(remaining, remaining - 1)) {
+                    putFailures.incrementAndGet();
+                    throw new IOException("injected transient upload failure");
+                }
             }
             delegate.put(key, source);
         }

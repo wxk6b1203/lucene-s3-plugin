@@ -526,6 +526,9 @@ curl -X POST "http://127.0.0.1:9200/books/_search?read_preference=weak" \
 - `match_all`
 - `ids.values`
 - `term`
+- `terms`
+- `prefix`
+- `exists`
 - `match`
 - `range`
 - `bool.filter`
