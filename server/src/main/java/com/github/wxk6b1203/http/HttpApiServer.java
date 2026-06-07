@@ -1852,7 +1852,7 @@ public class HttpApiServer implements AutoCloseable {
     private SearchRequest knnSearchRequest(RoutingContext context) {
         String index = context.pathParam("index");
         if (HttpApiProtobuf.isProtobufRequest(context)) {
-            return HttpApiProtobuf.searchRequest(context, index, context.queryParams().get("read_preference"));
+            return HttpApiProtobuf.knnSearchRequest(context, index, context.queryParams().get("read_preference"));
         }
         Map<String, Object> body = bodyAsMap(context);
         Map<String, Object> knn = mapValue(body.get("knn"));

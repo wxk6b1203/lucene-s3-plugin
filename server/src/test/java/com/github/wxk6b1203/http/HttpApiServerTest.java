@@ -639,6 +639,22 @@ class HttpApiServerTest {
                 200);
         assertEquals(List.of(), hitIds(filteredVectorSearch));
 
+        Map<String, Object> defaultKnnSearch = requestProtobuf("POST", "/books/_knn_search",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder()
+                        .setVector(com.github.wxk6b1203.http.proto.VectorQuery.newBuilder()
+                                .setField("embedding")
+                                .addVector(1.0f)
+                                .addVector(0.0f))
+                        .build(),
+                200);
+        assertEquals(List.of("doc-1", "doc-2"), hitIds(defaultKnnSearch));
+
+        Map<String, Object> malformedKnnSearch = requestProtobuf("POST", "/books/_knn_search",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder().build(),
+                400);
+        assertEquals("IllegalArgumentException", malformedKnnSearch.get("type"));
+        assertEquals("knn search requires vector", malformedKnnSearch.get("error"));
+
         Map<String, Object> jsonSearch = post("/books/_search", Map.of(
                 "query", Map.of("term", Map.of("category", "json")),
                 "size", 10

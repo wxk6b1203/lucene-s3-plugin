@@ -57,9 +57,25 @@ final class HttpApiProtobuf {
     }
 
     static SearchRequest searchRequest(RoutingContext context, String index, String readPreference) {
+        return searchRequest(context, index, readPreference, false);
+    }
+
+    static SearchRequest knnSearchRequest(RoutingContext context, String index, String readPreference) {
+        return searchRequest(context, index, readPreference, true);
+    }
+
+    private static SearchRequest searchRequest(
+            RoutingContext context,
+            String index,
+            String readPreference,
+            boolean requireVector
+    ) {
         try {
             com.github.wxk6b1203.http.proto.SearchRequest request =
                     com.github.wxk6b1203.http.proto.SearchRequest.parseFrom(bodyBytes(context));
+            if (requireVector && !request.hasVector()) {
+                throw new IllegalArgumentException("knn search requires vector");
+            }
             VectorQuery vector = vectorQuery(request);
             Map<String, Object> query = queryMap(request.getQuery());
             if (request.hasVector() && request.getVector().hasFilter()) {
@@ -383,11 +399,15 @@ final class HttpApiProtobuf {
             return null;
         }
         com.github.wxk6b1203.http.proto.VectorQuery vector = request.getVector();
+        int k = vector.getK() <= 0 ? 10 : vector.getK();
+        int numCandidates = vector.getNumCandidates() <= 0
+                ? Math.max(10, k)
+                : vector.getNumCandidates();
         return new VectorQuery(
                 vector.getField(),
                 vector.getVectorList(),
-                vector.getK(),
-                vector.getNumCandidates(),
+                k,
+                numCandidates,
                 vector.getMinScore() <= 0 ? null : vector.getMinScore()
         );
     }
