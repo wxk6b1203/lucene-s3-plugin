@@ -1820,6 +1820,9 @@ public class HttpApiServer implements AutoCloseable {
 
     private SearchRequest searchRequest(RoutingContext context) {
         String index = context.pathParam("index");
+        if (HttpApiProtobuf.isProtobufRequest(context)) {
+            return HttpApiProtobuf.searchRequest(context, index, context.queryParams().get("read_preference"));
+        }
         Map<String, Object> body = bodyAsMap(context);
         VectorQuery vector = vectorFromBody(body);
         return new SearchRequest(
@@ -1848,6 +1851,9 @@ public class HttpApiServer implements AutoCloseable {
 
     private SearchRequest knnSearchRequest(RoutingContext context) {
         String index = context.pathParam("index");
+        if (HttpApiProtobuf.isProtobufRequest(context)) {
+            return HttpApiProtobuf.searchRequest(context, index, context.queryParams().get("read_preference"));
+        }
         Map<String, Object> body = bodyAsMap(context);
         Map<String, Object> knn = mapValue(body.get("knn"));
         VectorQuery vector = vectorQuery(knn.isEmpty() ? body : knn);
@@ -2167,10 +2173,10 @@ public class HttpApiServer implements AutoCloseable {
     ) {
         long started = System.nanoTime();
         Context requestContext = Vertx.currentContext();
-        String body = context.body() == null ? null : context.body().asString();
-        HttpRequest.BodyPublisher publisher = body == null || body.isEmpty()
+        Buffer body = context.body() == null ? null : context.body().buffer();
+        HttpRequest.BodyPublisher publisher = body == null || body.length() == 0
                 ? HttpRequest.BodyPublishers.noBody()
-                : HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8);
+                : HttpRequest.BodyPublishers.ofByteArray(body.getBytes());
         HttpRequest.Builder request = HttpRequest.newBuilder()
                 .uri(URI.create("http://" + targetHost + ":" + targetPort + context.request().uri()))
                 .version(HttpClient.Version.HTTP_1_1)

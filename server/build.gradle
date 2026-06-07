@@ -1,6 +1,7 @@
 plugins {
     id 'java'
     id 'application'
+    id 'com.google.protobuf' version '0.9.5'
 }
 
 group = 'com.github.wxk6b1203'
@@ -29,6 +30,7 @@ dependencies {
     implementation deps.vertx.core
     implementation deps.vertx.web
     implementation deps.jetcd.core
+    implementation deps.protobuf.java
     implementation deps.slf4j.api
     implementation deps.prometheus.metrics.core
     implementation deps.prometheus.metrics.instrumentation.jvm
@@ -38,6 +40,12 @@ dependencies {
 
 test {
     useJUnitPlatform()
+}
+
+protobuf {
+    protoc {
+        artifact = 'com.google.protobuf:protoc:3.25.8'
+    }
 }
 
 application {

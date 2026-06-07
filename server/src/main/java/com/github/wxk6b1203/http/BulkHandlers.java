@@ -20,6 +20,9 @@ final class BulkHandlers {
     }
 
     static List<BulkItemRequest> bulkItems(RoutingContext context) {
+        if (HttpApiProtobuf.isProtobufRequest(context)) {
+            return HttpApiProtobuf.bulkItems(context, context.pathParam("index"));
+        }
         String body = bodyAsString(context);
         if (body == null || body.isBlank()) {
             return List.of();
