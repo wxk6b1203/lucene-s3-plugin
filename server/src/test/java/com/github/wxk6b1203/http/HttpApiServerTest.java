@@ -7,6 +7,8 @@ import com.github.wxk6b1203.index.IndexWriteOptions;
 import com.github.wxk6b1203.search.SearchRequest;
 import com.github.wxk6b1203.search.VectorQuery;
 import com.github.wxk6b1203.util.JsonUtil;
+import com.google.protobuf.MessageLite;
+import com.google.protobuf.Value;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -543,6 +545,129 @@ class HttpApiServerTest {
 
     @Test
     @Timeout(60)
+    @SuppressWarnings("unchecked")
+    void protobufSearchAndBulkUseBinaryRequestAndResponseBodies() throws Exception {
+        startServer();
+        createBooksIndex();
+
+        Map<String, Object> bulk = requestProtobuf("POST", "/_bulk",
+                com.github.wxk6b1203.http.proto.BulkRequest.newBuilder()
+                        .addItems(com.github.wxk6b1203.http.proto.BulkItem.newBuilder()
+                                .setAction(com.github.wxk6b1203.http.proto.BulkAction.BULK_ACTION_INDEX)
+                                .setIndex("books")
+                                .setId("doc-1")
+                                .setSource(HttpApiProtobuf.toStruct(Map.of(
+                                        "category", "proto",
+                                        "pages", 10,
+                                        "embedding", List.of(1.0, 0.0)
+                                ))))
+                        .addItems(com.github.wxk6b1203.http.proto.BulkItem.newBuilder()
+                                .setAction(com.github.wxk6b1203.http.proto.BulkAction.BULK_ACTION_INDEX)
+                                .setIndex("books")
+                                .setId("doc-2")
+                                .setSource(HttpApiProtobuf.toStruct(Map.of(
+                                        "category", "json",
+                                        "pages", 20,
+                                        "embedding", List.of(0.0, 1.0)
+                                ))))
+                        .build(),
+                200);
+        assertEquals(false, bulk.get("errors"));
+        List<Map<String, Object>> bulkItems = (List<Map<String, Object>>) bulk.get("items");
+        assertEquals(2, bulkItems.size());
+        Map<String, Object> firstItem = (Map<String, Object>) bulkItems.getFirst().get("index");
+        assertTrue(firstItem.get("shardId") instanceof Map<?, ?>);
+        Map<String, Object> firstShard = (Map<String, Object>) firstItem.get("shardId");
+        assertEquals("books", firstShard.get("indexName"));
+        assertEquals(expectedShard("doc-1", 1), ((Number) firstShard.get("shardNumber")).intValue());
+
+        Map<String, Object> malformedBulk = requestProtobuf("POST", "/_bulk",
+                com.github.wxk6b1203.http.proto.BulkRequest.newBuilder()
+                        .addItems(com.github.wxk6b1203.http.proto.BulkItem.newBuilder()
+                                .setAction(com.github.wxk6b1203.http.proto.BulkAction.BULK_ACTION_INDEX)
+                                .setIndex("books")
+                                .setId("missing-source"))
+                        .build(),
+                400);
+        assertEquals("IllegalArgumentException", malformedBulk.get("type"));
+
+        Map<String, Object> search = requestProtobuf("POST", "/books/_search",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder()
+                        .setQuery(com.github.wxk6b1203.http.proto.Query.newBuilder()
+                                .setTerm(com.github.wxk6b1203.http.proto.FieldValueQuery.newBuilder()
+                                        .setField("category")
+                                        .setValue(Value.newBuilder().setStringValue("proto"))))
+                        .setSize(10)
+                        .build(),
+                200);
+        assertEquals(List.of("doc-1"), hitIds(search));
+        assertTrue(((Number) search.get("tookMillis")).longValue() > 0);
+
+        Map<String, Object> invalidReadPreference = requestProtobuf("POST", "/books/_search",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder()
+                        .setReadPreference("owner")
+                        .build(),
+                400);
+        assertEquals("IllegalArgumentException", invalidReadPreference.get("type"));
+        assertEquals("read_preference must be weak or strong", invalidReadPreference.get("error"));
+
+        Map<String, Object> invalidQueryReadPreference = requestProtobuf(
+                "POST",
+                "/books/_search?read_preference=remote",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder().build(),
+                400);
+        assertEquals("IllegalArgumentException", invalidQueryReadPreference.get("type"));
+
+        Map<String, Object> filteredVectorSearch = requestProtobuf("POST", "/books/_search",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder()
+                        .setQuery(com.github.wxk6b1203.http.proto.Query.newBuilder()
+                                .setTerm(com.github.wxk6b1203.http.proto.FieldValueQuery.newBuilder()
+                                        .setField("category")
+                                        .setValue(Value.newBuilder().setStringValue("proto"))))
+                        .setVector(com.github.wxk6b1203.http.proto.VectorQuery.newBuilder()
+                                .setField("embedding")
+                                .addVector(0.0f)
+                                .addVector(1.0f)
+                                .setK(10)
+                                .setNumCandidates(10)
+                                .setFilter(com.github.wxk6b1203.http.proto.Query.newBuilder()
+                                        .setRange(com.github.wxk6b1203.http.proto.RangeQuery.newBuilder()
+                                                .setField("pages")
+                                                .setGte(Value.newBuilder().setNumberValue(15)))))
+                        .setSize(10)
+                        .build(),
+                200);
+        assertEquals(List.of(), hitIds(filteredVectorSearch));
+
+        Map<String, Object> defaultKnnSearch = requestProtobuf("POST", "/books/_knn_search",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder()
+                        .setVector(com.github.wxk6b1203.http.proto.VectorQuery.newBuilder()
+                                .setField("embedding")
+                                .addVector(1.0f)
+                                .addVector(0.0f))
+                        .build(),
+                200);
+        assertEquals(List.of("doc-1", "doc-2"), hitIds(defaultKnnSearch));
+
+        Map<String, Object> malformedKnnSearch = requestProtobuf("POST", "/books/_knn_search",
+                com.github.wxk6b1203.http.proto.SearchRequest.newBuilder().build(),
+                400);
+        assertEquals("IllegalArgumentException", malformedKnnSearch.get("type"));
+        assertEquals("knn search requires vector", malformedKnnSearch.get("error"));
+
+        Map<String, Object> jsonSearch = post("/books/_search", Map.of(
+                "query", Map.of("term", Map.of("category", "json")),
+                "size", 10
+        ), 200);
+        assertEquals(List.of("doc-2"), hitIds(jsonSearch));
+
+        Map<String, Object> nodes = requestProtobuf("GET", "/_nodes", null, 200);
+        assertFalse(nodes.isEmpty());
+        assertTrue(nodes.values().iterator().next() instanceof Map<?, ?>);
+    }
+
+    @Test
+    @Timeout(60)
     void bulkBackpressureRejectsOversizedRequests() throws Exception {
         startServer(2, "async", true, 0, 0, "immediate", 0, 1, 0);
         createBooksIndex();
@@ -973,6 +1098,14 @@ class HttpApiServerTest {
                 : JsonUtil.readValueAsMap(response.body());
     }
 
+    private Map<String, Object> requestProtobuf(String method, String path, MessageLite body, int expectedStatus) throws Exception {
+        ProtobufResponse response = responseProtobuf(method, path, body);
+        if (response.status() != expectedStatus) {
+            fail(method + " " + path + " returned " + response.status() + ": " + response.body());
+        }
+        return response.body();
+    }
+
     private Map<String, Object> delete(String path, Object body, int expectedStatus) throws Exception {
         return request("DELETE", path, body, expectedStatus);
     }
@@ -1019,6 +1152,48 @@ class HttpApiServerTest {
             connection.disconnect();
         }
         return new Response(status, responseBody);
+    }
+
+    private ProtobufResponse responseProtobuf(String method, String path, MessageLite body) throws Exception {
+        URL url = URI.create("http://127.0.0.1:" + port + path).toURL();
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod(method);
+        connection.setConnectTimeout((int) Duration.ofSeconds(5).toMillis());
+        connection.setReadTimeout((int) Duration.ofSeconds(10).toMillis());
+        connection.setRequestProperty("content-type", HttpApiProtobuf.MEDIA_TYPE);
+        connection.setRequestProperty("accept", HttpApiProtobuf.MEDIA_TYPE);
+        connection.setDoInput(true);
+        if (body != null) {
+            connection.setDoOutput(true);
+            try (OutputStream outputStream = connection.getOutputStream()) {
+                outputStream.write(body.toByteArray());
+            }
+        }
+        int status = connection.getResponseCode();
+        byte[] responseBody;
+        try (InputStream inputStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream()) {
+            responseBody = inputStream == null ? new byte[0] : inputStream.readAllBytes();
+        } finally {
+            connection.disconnect();
+        }
+        Map<String, Object> parsed = protobufResponseBody(path, status, responseBody);
+        return new ProtobufResponse(status, parsed);
+    }
+
+    private Map<String, Object> protobufResponseBody(String path, int status, byte[] responseBody) throws Exception {
+        if (responseBody.length == 0) {
+            return Map.of();
+        }
+        if (status >= 400) {
+            return HttpApiProtobuf.toMap(com.github.wxk6b1203.http.proto.ErrorResponse.parseFrom(responseBody));
+        }
+        if (path.contains("_bulk")) {
+            return HttpApiProtobuf.toMap(com.github.wxk6b1203.http.proto.BulkResponse.parseFrom(responseBody));
+        }
+        if (path.contains("_search")) {
+            return HttpApiProtobuf.toMap(com.github.wxk6b1203.http.proto.SearchResponse.parseFrom(responseBody));
+        }
+        return HttpApiProtobuf.toMap(com.google.protobuf.Struct.parseFrom(responseBody));
     }
 
     private Response responseRaw(String method, String path, String body) throws Exception {
@@ -1148,5 +1323,8 @@ class HttpApiServerTest {
     }
 
     private record Response(int status, String body) {
+    }
+
+    private record ProtobufResponse(int status, Map<String, Object> body) {
     }
 }

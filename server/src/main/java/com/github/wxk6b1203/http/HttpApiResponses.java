@@ -3,6 +3,7 @@ package com.github.wxk6b1203.http;
 import com.github.wxk6b1203.errors.StorageException;
 import com.github.wxk6b1203.errors.NotMasterException;
 import com.github.wxk6b1203.util.JsonUtil;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.ext.web.RoutingContext;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.exception.SdkServiceException;
@@ -22,6 +23,13 @@ final class HttpApiResponses {
     }
 
     static void json(RoutingContext context, int status, Object value) {
+        if (HttpApiProtobuf.wantsProtobuf(context)) {
+            context.response()
+                    .setStatusCode(status)
+                    .putHeader("content-type", HttpApiProtobuf.MEDIA_TYPE)
+                    .end(Buffer.buffer(HttpApiProtobuf.writeValueAsBytes(value)));
+            return;
+        }
         context.response()
                 .setStatusCode(status)
                 .putHeader("content-type", "application/json")
@@ -30,14 +38,22 @@ final class HttpApiResponses {
 
     static void error(RoutingContext context, int status, Exception e) {
         Throwable cause = responseCause(e);
+        Map<String, Object> body = Map.of(
+                "error", cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage(),
+                "type", cause.getClass().getSimpleName(),
+                "status", status
+        );
+        if (HttpApiProtobuf.wantsProtobuf(context)) {
+            context.response()
+                    .setStatusCode(status)
+                    .putHeader("content-type", HttpApiProtobuf.MEDIA_TYPE)
+                    .end(Buffer.buffer(HttpApiProtobuf.writeValueAsBytes(body)));
+            return;
+        }
         context.response()
                 .setStatusCode(status)
                 .putHeader("content-type", "application/json")
-                .end(new String(JsonUtil.writeValueAsBytes(Map.of(
-                        "error", cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage(),
-                        "type", cause.getClass().getSimpleName(),
-                        "status", status
-                ))));
+                .end(new String(JsonUtil.writeValueAsBytes(body)));
     }
 
     static int status(Exception e) {

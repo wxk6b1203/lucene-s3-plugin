@@ -476,6 +476,43 @@ curl -X POST http://127.0.0.1:9200/_bulk \
 
 协调节点会先为无 `_id` 的 item 生成稳定 ID，再按目标 shard owner 分组转发到内部 shard bulk API；`create` action 是 create-only，遇到已有 `_id` 会返回该 item 的错误。
 
+### Protobuf 请求
+
+JSON 仍是默认格式。需要降低 HTTP 编解码开销时，可按 `server/src/main/proto/lucene_s3/http/v1/http_api.proto` 中的预定义 message 发送二进制请求，并设置：
+
+- `Content-Type: application/x-protobuf`
+- `Accept: application/x-protobuf`
+
+当前高频接口使用 typed Protobuf：
+
+- `_search` / `_knn_search`: `SearchRequest` -> `SearchResponse`
+- `_bulk` / `/<index>/_bulk`: `BulkRequest` -> `BulkResponse`
+- 错误响应：`ErrorResponse`
+
+文档 `_source`、动态聚合结果等天然开放结构仍使用 `google.protobuf.Struct`。`_bulk` 的 typed 请求结构等价于：
+
+```json
+{
+  "items": [
+    {
+      "action": "BULK_ACTION_INDEX",
+      "index": "books",
+      "id": "doc-2",
+      "routing": "user-1",
+      "source": {"title": "Bulk Lucene", "author": "alice", "price": 29.9}
+    },
+    {
+      "action": "BULK_ACTION_DELETE",
+      "index": "books",
+      "id": "doc-1",
+      "routing": "user-1"
+    }
+  ]
+}
+```
+
+其他低频动态接口暂时保留 `google.protobuf.Struct` fallback。`Struct` 的 number 类型按 Protobuf `double` 表示；需要严格 64 位整数语义的外部客户端应优先使用 typed 字段或传字符串。
+
 ### 搜索
 
 ```bash

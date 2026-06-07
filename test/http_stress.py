@@ -323,7 +323,15 @@ def search_worker(args: argparse.Namespace, worker: int, stop_at: float, metrics
         weak_search,
         strong_search,
         aggregation_search,
+        aggregation_options_search,
+        bool_search,
+        exists_search,
+        ids_search,
+        prefix_search,
+        range_search,
         search_after,
+        terms_search,
+        vector_search,
     ]
     while time.monotonic() < stop_at:
         operation = rng.choice(operations)
@@ -428,6 +436,166 @@ def aggregation_search(args: argparse.Namespace, rng: random.Random, metrics: Me
     metrics.record("aggregation_search", result)
 
 
+def aggregation_options_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    low = 50 + rng.randint(0, 250)
+    mid = low + 200
+    high = mid + 300
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {"match_all": {}},
+            "size": 0,
+            "aggs": {
+                "category_counts": {
+                    "terms": {
+                        "field": "category",
+                        "size": min(20, max(1, len(args.categories) + 1)),
+                        "min_doc_count": 1,
+                        "missing": "missing-category",
+                        "order": {"_key": "asc"},
+                    }
+                },
+                "page_ranges": {
+                    "range": {
+                        "field": "pages",
+                        "ranges": [
+                            {"key": "low", "to": low},
+                            {"key": "mid", "from": low, "to": mid},
+                            {"key": "high", "from": mid, "to": high},
+                            {"key": "tail", "from": high},
+                        ],
+                    }
+                },
+                "min_price": {"min": {"field": "price"}},
+                "max_price": {"max": {"field": "price"}},
+                "sum_pages": {"sum": {"field": "pages"}},
+                "available_count": {"value_count": {"field": "available"}},
+            },
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("aggregation_options_search", result)
+
+
+def bool_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    category = rng.choice(args.categories)
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"match": {"description": category}},
+                    ],
+                    "filter": [
+                        {"range": {"pages": {"gte": 100, "lte": 800}}},
+                        {"terms": {"tenant": random_tenants(rng, 4)}},
+                    ],
+                    "should": [
+                        {"prefix": {"title": {"value": "lucene"}}},
+                        {"term": {"available": True}},
+                    ],
+                    "must_not": [
+                        {"term": {"category": "missing-category"}},
+                    ],
+                }
+            },
+            "size": args.search_size,
+            "sort": [
+                {"published_at": {"order": "desc"}},
+                {"_id": {"order": "asc"}},
+            ],
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("bool_search", result)
+
+
+def exists_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    field = rng.choice(["description", "category", "pages", "embedding"])
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {"exists": {"field": field}},
+            "size": args.search_size,
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("exists_search", result)
+
+
+def ids_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    values = [f"warmup-{rng.randrange(max(args.warmup_docs, 1))}"]
+    if args.write_workers > 0:
+        writer = rng.randrange(args.write_workers)
+        sequence = writer * 1_000_000_000 + rng.randrange(max(args.bulk_size * 4, 1))
+        values.append(f"writer-{writer}-{sequence}")
+    values.append("missing-id")
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {"ids": {"values": values}},
+            "size": args.search_size,
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("ids_search", result)
+
+
+def prefix_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    prefix = rng.choice(category_prefixes(args.categories))
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {"prefix": {"category": {"value": prefix}}},
+            "size": args.search_size,
+            "sort": [
+                {"category": {"order": "asc"}},
+                {"_id": {"order": "asc"}},
+            ],
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("prefix_search", result)
+
+
+def range_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    min_price = round(10 + rng.randint(0, 500) * 0.37, 2)
+    max_price = round(min_price + rng.randint(10, 200) * 0.37, 2)
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"range": {"price": {"gte": min_price, "lte": max_price}}},
+                        {"range": {"published_at": {"gte": 20260101, "lte": 20260531}}},
+                    ]
+                }
+            },
+            "size": args.search_size,
+            "sort": [
+                {"price": {"order": "desc"}},
+                {"_id": {"order": "asc"}},
+            ],
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("range_search", result)
+
+
 def search_after(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
     price = round(10 + rng.randint(0, 500) * 0.37, 2)
     result = request(
@@ -446,6 +614,59 @@ def search_after(args: argparse.Namespace, rng: random.Random, metrics: Metrics)
         timeout=args.timeout,
     )
     metrics.record("search_after", result)
+
+
+def terms_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    categories = rng.sample(args.categories, k=min(len(args.categories), rng.randint(1, 3)))
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"terms": {"category": categories}},
+                        {"terms": {"tenant": random_tenants(rng, 8)}},
+                    ]
+                }
+            },
+            "size": args.search_size,
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("terms_search", result)
+
+
+def vector_search(args: argparse.Namespace, rng: random.Random, metrics: Metrics) -> None:
+    result = request(
+        args.base_url,
+        "POST",
+        f"/{args.index}/_search",
+        {
+            "query": {"match": {"description": rng.choice(args.categories)}},
+            "knn": {
+                "field": "embedding",
+                "query_vector": vector(rng.randint(0, 1_000_000)),
+                "k": args.search_size,
+                "num_candidates": max(args.search_size * 5, 50),
+                "filter": {"range": {"pages": {"gte": 100}}},
+            },
+            "size": args.search_size,
+            "read_preference": "weak",
+        },
+        timeout=args.timeout,
+    )
+    metrics.record("vector_search", result)
+
+
+def random_tenants(rng: random.Random, count: int) -> list[str]:
+    return [f"tenant-{rng.randrange(128)}" for _ in range(count)]
+
+
+def category_prefixes(categories: list[str]) -> list[str]:
+    prefixes = sorted({category[: max(1, min(3, len(category)))] for category in categories})
+    return prefixes or [""]
 
 
 def run_workload(args: argparse.Namespace, metrics: Metrics) -> None:

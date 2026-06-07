@@ -53,6 +53,9 @@ final class HttpApiRequestParsing {
     }
 
     static Map<String, Object> bodyAsMap(RoutingContext context) {
+        if (HttpApiProtobuf.isProtobufRequest(context)) {
+            return HttpApiProtobuf.bodyAsMap(context);
+        }
         String body = bodyAsString(context);
         if (body == null || body.isBlank()) {
             return Map.of();
