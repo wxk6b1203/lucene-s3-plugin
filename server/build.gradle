@@ -50,6 +50,7 @@ protobuf {
 
 application {
     mainClass = 'com.github.wxk6b1203.LuceneS3'
+    applicationDefaultJvmArgs = ['--add-modules', 'jdk.incubator.vector']
 }
 
 def pathingJar = tasks.register('pathingJar', Jar) {
